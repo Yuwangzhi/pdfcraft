@@ -354,3 +354,5 @@ Validation and installation details: `docs/local-selection-translation.md`.
 - Local translation reflow: semantic paragraphs/headings/lists, inline math in flowing prose, separate centered display equations, and width-responsive popup layout; validated on the user-authorized current PDF.
 
 - Local translation sidebar: selection and screenshot translation share a docked, resizable right column, automatically shown on translation; each request fully replaces previous content, outside clicks keep it open, original text stays collapsed and the previous navigation panel returns on explicit dismissal.
+
+- Local screenshot translation: reject substantial untranslated English prose, retry once as text with the same provider, and report failure if correction still returns English.

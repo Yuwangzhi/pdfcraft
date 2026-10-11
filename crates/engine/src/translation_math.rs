@@ -157,7 +157,7 @@ fn render_formula(source: &str, display: bool, font: &latex_rust::MathFont) -> R
 
 /// Supports the requested delimiters and the common $ / $$ alternatives. Text is kept in
 /// order; an unclosed delimiter stays visible as text. Bound formula count from API input.
-fn split(text: &str) -> Vec<(String, Option<bool>)> {
+pub(crate) fn split(text: &str) -> Vec<(String, Option<bool>)> {
     let mut out = Vec::new();
     let mut remaining = text;
     while !remaining.is_empty() && out.len() < 128 {

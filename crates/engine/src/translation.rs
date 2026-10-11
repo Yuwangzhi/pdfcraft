@@ -71,7 +71,11 @@ pub fn image_to_chinese(image: &SelectionImage) -> Result<String, String> {
 
 fn request_body(text: &str, png: Option<&[u8]>) -> serde_json::Value {
     let screenshot = text.trim().is_empty() && png.is_some();
-    let instruction = if screenshot { "请翻译截图中全部可见内容，保留并排版公式。" } else { text };
+    let instruction = if screenshot {
+        "请把截图中的全部可见正文翻译成简体中文，包括标题、摘要和段落。不要只识别或转写英文原文。保留并排版公式、数字和引用，只返回中文译文。"
+    } else {
+        text
+    };
     let prompt = if screenshot {
         PROMPT.replace("但只翻译选中文字对应的内容", "翻译截图中的全部可见内容")
     } else {
@@ -112,12 +116,50 @@ fn api_key() -> Result<String, String> {
 /// sends a failed request to another provider.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn to_chinese_with_image(text: &str, image: Option<&SelectionImage>) -> Result<String, String> {
-    use std::io::{Read, Write};
-    use std::process::{Command, Stdio};
     let text = if text.trim().is_empty() && image.is_some() { String::new() } else { prepare(text)? };
     let key = api_key()?;
     let png = image.map(SelectionImage::png).transpose()?;
-    let body = request_body(&text, png.as_deref()).to_string();
+    translate_with(&text, png.as_deref(), |body| complete(&key, body))
+}
+
+/// Validate substantial prose, without treating formulas and English model names as errors.
+/// One text-only correction uses the same provider; never show an OCR-only response as a
+/// successful Chinese translation or loop indefinitely when the provider ignores the task.
+fn translate_with(text: &str, png: Option<&[u8]>, mut complete: impl FnMut(serde_json::Value) -> Result<String, String>) -> Result<String, String> {
+    let first = complete(request_body(text, png))?;
+    if !untranslated_prose(&first) {
+        return Ok(first);
+    }
+    let mut correction = request_body(&first, None);
+    correction["messages"][0]["content"] = json!(format!(
+        "上一轮返回了英文识别稿，未完成翻译。本轮必须将用户提供的识别稿中的标题和全部自然语言正文完整翻译成简体中文，不能再返回英文转写。{PROMPT}"
+    ));
+    let translated = complete(correction)?;
+    if untranslated_prose(&translated) {
+        return Err("服务返回了英文原文，自动重译后仍未生成中文译文，请重新翻译或缩小选区。".into());
+    }
+    Ok(translated)
+}
+
+fn untranslated_prose(text: &str) -> bool {
+    let prose: String = crate::translation_math::split(text).into_iter().filter_map(|(text, math)| math.is_none().then_some(text)).collect();
+    prose.split("\n\n").any(|paragraph| {
+        let chinese = paragraph.chars().filter(|c| matches!(c, '\u{3400}'..='\u{9fff}' | '\u{20000}'..='\u{3134f}')).count();
+        let words = paragraph
+            .split_whitespace()
+            .filter(|word| !word.contains("://"))
+            .flat_map(|word| word.split(|c: char| !c.is_ascii_alphabetic()))
+            .filter(|word| word.len() >= 2 && word.chars().any(|c| c.is_ascii_lowercase()))
+            .count();
+        words >= 8 && chinese.saturating_mul(2) < words
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn complete(key: &str, body: serde_json::Value) -> Result<String, String> {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+    let body = body.to_string();
     let config = format!(
         "header = {}\nheader = \"Content-Type: application/json\"\ndata-binary = {}\n",
         config_quote(&format!("Authorization: Bearer {key}")),
@@ -202,8 +244,53 @@ mod tests {
     fn screenshot_request_translates_the_entire_crop_without_extracted_text() {
         let body = request_body("", Some(b"synthetic png"));
         assert!(body["messages"][0]["content"].as_str().unwrap().contains("翻译截图中的全部可见内容"));
-        assert!(body["messages"][1]["content"][0]["text"].as_str().unwrap().contains("全部可见内容"));
+        assert!(body["messages"][1]["content"][0]["text"].as_str().unwrap().contains("全部可见正文翻译成简体中文"));
         assert_eq!(body["messages"][1]["content"][1]["type"], "image_url");
+    }
+
+    #[test]
+    fn english_ocr_is_retranslated_once_and_never_published_as_chinese() {
+        let english = "Financial time series prediction supports ranking and investment decisions using historical observations.";
+        let chinese = "金融时间序列预测利用历史观测支持排名和投资决策。";
+        let mut requests = Vec::new();
+        let result = translate_with("", Some(b"synthetic png"), |body| {
+            requests.push(body);
+            Ok(if requests.len() == 1 { english } else { chinese }.into())
+        })
+        .unwrap();
+        assert_eq!(result, chinese);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1]["messages"][1]["content"].as_array().unwrap().len(), 1, "correction sends text only");
+        assert_eq!(requests[1]["messages"][1]["content"][0]["text"], english);
+        let mut attempts = 0;
+        let error = translate_with(english, None, |_| {
+            attempts += 1;
+            Ok(english.into())
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 2);
+        assert!(error.contains("未生成中文"));
+        let mut attempts = 0;
+        assert_eq!(
+            translate_with(english, None, |_| {
+                attempts += 1;
+                Ok(chinese.into())
+            })
+            .unwrap(),
+            chinese
+        );
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn translation_language_check_preserves_math_names_and_detects_english_paragraphs() {
+        assert!(!untranslated_prose(
+            r"模型 DPTNet 使用 CNN、RNN 与 Transformer 预测股票。\[\operatorname{softmax}(x)=\frac{\exp(x)}{\sum_i \exp(x_i)}\]"
+        ));
+        assert!(!untranslated_prose(r"\[\text{Learning representations with historical observations and delayed peer evidence}\]"));
+        assert!(!untranslated_prose("DPTNet, CSI300, Nasdaq-100, GRU"));
+        assert!(!untranslated_prose("代码见 https://example.com/financial-time-series-prediction-and-ranking-network-with-lags"));
+        assert!(untranslated_prose("# 摘要\n\nFinancial time series prediction supports ranking and investment decisions in financial services."));
     }
 
     #[test]
