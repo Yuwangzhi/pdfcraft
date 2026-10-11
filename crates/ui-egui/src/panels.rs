@@ -495,14 +495,17 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     ui.horizontal(|ui| {
                         let label = ui.label(tl!("Search"));
                         let previous = bookmark_query.clone();
-                        let response =
-                            ui.add(egui::TextEdit::singleline(&mut bookmark_query).desired_width(ui.available_width() - 32.0)).labelled_by(label.id);
+                        // Reserve the clear button and the actual inter-widget gap. Overflow
+                        // grows the panel every frame, undoing the user's resize on release.
+                        let clear_size = 26.0;
+                        let search_width = (ui.available_width() - clear_size - ui.spacing().item_spacing.x).max(24.0);
+                        let response = ui.add(egui::TextEdit::singleline(&mut bookmark_query).desired_width(search_width)).labelled_by(label.id);
                         response.widget_info(|| {
                             let mut info = egui::WidgetInfo::text_edit(ui.is_enabled(), &previous, &bookmark_query, "");
                             info.label = Some(tl!("Search").to_string());
                             info
                         });
-                        if icons::button(ui, "x", 26.0, false, tl!("Clear")).clicked() {
+                        if icons::button(ui, "x", clear_size, false, tl!("Clear")).clicked() {
                             bookmark_query.clear();
                         }
                     });

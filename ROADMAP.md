@@ -1,5 +1,9 @@
 # PdfCraft roadmap
 
+Local maintenance (2026-10-11): bookmark sidebar resize snap-back repaired;
+English and Simplified Chinese pointer-drag regressions and all 7 bookmark tests
+pass. Overall parity estimates unchanged. See `docs/local-sidebar-resize.md`.
+
 The milestones, current progress and time estimates to Acrobat Pro feature parity. Keep this up to date:
 - **Every session:** update the progress column and add a line to the log.
 - **Every milestone:** re-estimate.

@@ -27,6 +27,41 @@ fn harness() -> Harness<'static, PdfCraftApp> {
     h
 }
 
+#[test]
+fn resized_bookmark_panel_keeps_its_width_across_frames() {
+    for language in ["en", "zh-hans"] {
+        let mut h = harness();
+        h.state_mut().apply_edit(pdfcraft_engine::Edit::AddBookmark {
+            parent: vec![],
+            index: 0,
+            title: "A long bookmark title that wraps inside a narrow sidebar".into(),
+            page: 0,
+        });
+        h.state_mut().set_option("language", language).unwrap();
+        h.run_steps(80);
+        let title = if language == "en" { "Bookmarks" } else { "书签" };
+        let before = h.query_all_by_label(title).last().unwrap().rect();
+        // The frame has a 14 pt left margin and a 1 pt stroke.
+        let start = egui::pos2(before.left() - 15.0, before.center().y + 100.0);
+        let end = start + egui::vec2(100.0, 0.0);
+        h.hover_at(start);
+        h.run_steps(1);
+        h.drag_at(start);
+        h.run_steps(1);
+        for step in 1..=5 {
+            h.hover_at(start.lerp(end, step as f32 / 5.0));
+            h.run_steps(1);
+        }
+        h.drop_at(end);
+        h.run_steps(1);
+        let released = h.query_all_by_label(title).last().unwrap().rect().left();
+        assert!(released > before.left() + 40.0, "panel must actually become narrower");
+        h.run_steps(80);
+        let settled = h.query_all_by_label(title).last().unwrap().rect().left();
+        assert!((settled - released).abs() <= 1.0, "{language}: sidebar bounced back: {released} -> {settled}");
+    }
+}
+
 fn outline(h: &Harness<'static, PdfCraftApp>) -> Vec<(String, Option<usize>, usize)> {
     let id = h.state().views[0].id;
     fn flat(items: &[pdfcraft_render::OutlineItem], depth: usize, out: &mut Vec<(String, Option<usize>, usize)>) {
