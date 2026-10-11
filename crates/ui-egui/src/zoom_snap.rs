@@ -59,6 +59,18 @@ impl PdfCraftApp {
                     view.zoom_to_rect(rect);
                 }
             }
+            QuickTool::TranslateRegion => {
+                if rect.width() < 6.0 || rect.height() < 6.0 {
+                    return;
+                }
+                let view = &mut self.views[index];
+                if let (Some(doc), Some(ctx)) = (self.session.get(view.id), self.ctx.as_ref()) {
+                    let image = pdfcraft_engine::translation::SelectionImage { source: doc.export_source(), page, rect: view_rect };
+                    view.clear_selection();
+                    view.translation.start(ctx, String::new(), Some(image));
+                }
+                self.quick_tool = QuickTool::Select;
+            }
             QuickTool::Snapshot => {
                 if view_rect[2] - view_rect[0] < 2.0 || view_rect[3] - view_rect[1] < 2.0 {
                     return;

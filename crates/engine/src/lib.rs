@@ -23,6 +23,8 @@ pub mod links;
 pub mod ocr;
 pub mod optimizer;
 pub mod signature_image;
+pub mod translation;
+pub mod translation_math;
 mod upright_image;
 pub mod xfa;
 

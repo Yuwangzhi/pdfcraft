@@ -52,3 +52,7 @@ dependencies change (plan/adr/0002, 0006).
 Vendored (vendor/, patched; see vendor/README.md):
 - hayro 0.7.1 — Apache-2.0 OR MIT, Copyright the hayro authors (licence files kept in vendor/hayro).
 - hayro-interpret 0.7.0 — Apache-2.0 OR MIT, Copyright the hayro authors (LICENSE-APACHE, LICENSE-MIT kept in vendor/hayro-interpret).
+
+STIX Two Math (bundled by latex-rust 2.1.1)
+Copyright 2001-2021 The STIX Fonts Project Authors.
+SIL Open Font License 1.1; see docs/licenses/OFL-STIX-Two-Math.txt.

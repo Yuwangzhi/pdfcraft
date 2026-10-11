@@ -159,6 +159,46 @@ impl Automation {
             "comment_image_preview" => return self.comment_image_preview(&a),
             "text_extract" => self.text_extract(&a)?,
             "text_find" => self.text_find(&a)?,
+            "text_render_math" => {
+                let text = a.str("text")?;
+                if text.len() > 32_768 {
+                    return Err(Args::wrong("text", "at most 32768 bytes"));
+                }
+                let mut output = Vec::new();
+                for part in pdfcraft_engine::translation_math::render(text) {
+                    match part {
+                        pdfcraft_engine::translation_math::Part::Text(text) => output.push(Content::Json(json!({"text": text}))),
+                        pdfcraft_engine::translation_math::Part::Math { latex, display, png } => {
+                            let data = png.map_err(failed)?;
+                            let reader = png::Decoder::new(std::io::Cursor::new(&data)).read_info().map_err(failed)?;
+                            let (width, height) = (reader.info().width, reader.info().height);
+                            output.push(Content::Json(json!({"latex": latex,"display": display})));
+                            output.push(Content::Png { data, width, height });
+                        }
+                    }
+                }
+                return Ok(output);
+            }
+            "text_translate" | "region_translate" => {
+                if !a.opt_bool("allow_network")?.unwrap_or(false) {
+                    return Err(ToolError::InvalidArgs(
+                        "Set allow_network=true to send the supplied text and optional selection crop to DeepSeek.".into(),
+                    ));
+                }
+                let image = if let Some(rect) = a.get("rect") {
+                    let rect: [f32; 4] = serde_json::from_value(rect.clone()).map_err(|_| Args::wrong("rect", "[x0,y0,x1,y1] in page points"))?;
+                    Some(pdfcraft_engine::translation::SelectionImage { source: self.doc(&a)?.export_source(), page: self.page(&a)?, rect })
+                } else {
+                    None
+                };
+                let translated = if name == "region_translate" {
+                    pdfcraft_engine::translation::image_to_chinese(image.as_ref().ok_or_else(|| Args::wrong("rect", "a screenshot rectangle"))?)
+                } else {
+                    pdfcraft_engine::translation::to_chinese_with_image(a.str("text")?, image.as_ref())
+                }
+                .map_err(failed)?;
+                json!({ "translation": translated, "target": "zh-CN", "provider": "DeepSeek", "model": pdfcraft_engine::translation::MODEL, "selection_image": image.is_some() })
+            }
             "page_rotate" => {
                 let degrees = a.int("degrees")?;
                 if degrees % 90 != 0 {

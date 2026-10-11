@@ -1025,3 +1025,18 @@ fn measurement_tools_draw_live_calibrate_save_and_export() {
     assert!((h.state().views[0].measure.drawing_points - 100.0).abs() < 0.01);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn screenshot_translation_shortcut_can_be_changed_and_cancelled() {
+    let (mut h, c) = harness();
+    ok(&mut h, &c, "ui.set", json!({"key":"translation-shortcut", "value":"Alt+Shift+T"}));
+    ok(&mut h, &c, "ui.key", json!({"key":"T", "modifiers":["alt", "shift"]}));
+    assert_eq!(h.state().quick_tool, pdfcraft_ui_egui::QuickTool::TranslateRegion);
+    let saved = h.state().persist();
+    let mut restored = PdfCraftApp::new();
+    restored.restore(&saved);
+    assert_eq!(serde_json::from_str::<Value>(&restored.persist()).unwrap()["translation_shortcut"], "Alt+Shift+T");
+    ok(&mut h, &c, "ui.key", json!({"key":"Escape"}));
+    assert_eq!(h.state().quick_tool, pdfcraft_ui_egui::QuickTool::Select);
+    assert!(call(&mut h, &c, "ui.set", json!({"key":"translation-shortcut", "value":"Command+C"})).is_err());
+}

@@ -287,6 +287,7 @@ pub struct DocView {
     pub(crate) text_failed: HashSet<usize>,
     pub find: Option<Find>,
     selection: Option<Selection>,
+    pub(crate) translation: crate::translation_ui::Translation,
     /// Clicks in the current run on the text layer: two select a word, three the line, four the page.
     clicks: u32,
     last_queue: Vec<RenderRequest>,
@@ -481,6 +482,7 @@ impl DocView {
             text_failed: HashSet::new(),
             find: None,
             selection: None,
+            translation: Default::default(),
             clicks: 0,
             last_queue: Vec::new(),
             viewport_w: 800.0,
@@ -786,6 +788,38 @@ impl DocView {
         let s = self.selection?;
         let t = self.texts.get(&s.page)?;
         Some(t.text_of(s.range())).filter(|x| !x.is_empty())
+    }
+
+    pub(crate) fn translation_key(&self) -> Option<(usize, usize, usize)> {
+        self.selection.map(|s| (s.page, s.anchor, s.head))
+    }
+
+    pub(crate) fn start_translation(&mut self, ctx: &egui::Context, doc: &pdfcraft_engine::Document) -> bool {
+        let Some(text) = self.selected_text() else { return false };
+        let image = self.selection.and_then(|s| {
+            let layer = self.texts.get(&s.page)?;
+            let mut bounds = egui::Rect::NOTHING;
+            for glyph in layer.glyphs.get(s.range())? {
+                bounds = bounds.union(egui::Rect::from_min_max(egui::pos2(glyph.rect[0], glyph.rect[1]), egui::pos2(glyph.rect[2], glyph.rect[3])));
+            }
+            if !bounds.is_finite() || !bounds.is_positive() {
+                return None;
+            }
+            let bounds = bounds.expand(4.0);
+            Some(pdfcraft_engine::translation::SelectionImage {
+                source: doc.export_source(),
+                page: s.page,
+                rect: [bounds.min.x.max(0.0), bounds.min.y.max(0.0), bounds.max.x, bounds.max.y],
+            })
+        });
+        self.translation.start(ctx, text, image);
+        ctx.request_repaint();
+        true
+    }
+
+    pub(crate) fn translation_anchor(&self) -> Option<Pos2> {
+        let selection = self.selection?;
+        self.glyph_screen_pos(selection.page, selection.head).filter(|p| self.viewport_screen.contains(*p))
     }
 
     pub fn thumb(&self, page: usize) -> Option<&TextureHandle> {
@@ -1840,7 +1874,8 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         | QuickTool::Link
         | QuickTool::SignArea { .. }
         | QuickTool::MarqueeZoom
-        | QuickTool::Snapshot => false,
+        | QuickTool::Snapshot
+        | QuickTool::TranslateRegion => false,
     };
     let prefs = &app.comment_prefs;
     let allowed = doc.allows_annotation();
@@ -2146,7 +2181,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             if matches!(tool, QuickTool::SignArea { .. }) {
                 crate::sign_ui::page_input(ui, &resp, &xf, i, info, view);
             }
-            if matches!(tool, QuickTool::MarqueeZoom | QuickTool::Snapshot) {
+            if matches!(tool, QuickTool::MarqueeZoom | QuickTool::Snapshot | QuickTool::TranslateRegion) {
                 crate::zoom_snap::page_input(ui, &resp, &xf, i, view);
             }
             if tool == QuickTool::Crop && crate::crop::page_input(ui, &resp, &xf, i, info, view, can_crop) {
@@ -2458,6 +2493,13 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                     ui.close();
                 }
                 return;
+            }
+            if view.translation_key().is_some() {
+                if ui.button("翻译为中文  ⌘⇧T").on_hover_text("DeepSeek Flash · 发送所选文字及选区截图").clicked() {
+                    view.start_translation(ui.ctx(), doc);
+                    ui.close();
+                }
+                ui.separator();
             }
             canvas_action = comments::context_menu(ui, view, info, prefs, allowed);
         });

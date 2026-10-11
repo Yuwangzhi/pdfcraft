@@ -130,6 +130,14 @@ impl PdfCraftApp {
             "bookmark.add" => self.bookmark_action(crate::panels::BmAction::New),
             "edit.undo" => self.undo(),
             "edit.redo" => self.redo(),
+            "edit.translate" => {
+                if let (Some(ctx), Some(view)) = (self.ctx.clone(), active.and_then(|i| self.views.get_mut(i)))
+                    && let Some(doc) = self.session.get(view.id)
+                    && !view.start_translation(&ctx, doc)
+                {
+                    self.notify("请先用鼠标选中需要翻译的文字。");
+                }
+            }
             "edit.find" => {
                 if let Some(i) = active {
                     self.views[i].open_find();
@@ -406,6 +414,13 @@ impl PdfCraftApp {
                 }
             }
             "view.marquee_zoom" => self.quick_tool = crate::QuickTool::MarqueeZoom,
+            "edit.translate_region" => {
+                self.quick_tool = crate::QuickTool::TranslateRegion;
+                if let Some((i, _)) = self.active_ids() {
+                    self.views[i].clear_selection();
+                }
+                self.notify("请在页面内拖动框选要翻译的区域；Esc 取消。");
+            }
             "edit.snapshot" => {
                 self.quick_tool = crate::QuickTool::Snapshot;
                 self.notify_tr("Drag a rectangle around the area to copy");
@@ -607,7 +622,11 @@ pub(crate) fn registry_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui, menu: &str
             }
             continue;
         }
-        let shortcut = spec.shortcut.map(|s| s.label(mac)).unwrap_or_default();
+        let shortcut = if spec.id == "edit.translate_region" {
+            app.translation_shortcut.label()
+        } else {
+            spec.shortcut.map(|s| s.label(mac)).unwrap_or_default()
+        };
         let enabled = app.command_enabled(spec);
         let resp = ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(shortcut));
         if resp.clicked() {

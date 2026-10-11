@@ -328,3 +328,25 @@ Newest first. One line per session: the date, what moved, and the new overall pe
 - **2026-09-30 (session 1):** planning complete; viewer vertical slice.
 
 - M13: common command, batch, inspection and bounded preview tools share the existing confined automation path. MCP tools carry complete hints and reject unknown top-level keys as invalid parameters.
+
+
+## Local macOS font repair — 2026-10-11
+
+Local-only v0.5.0 build: runtime PingFang SC UI fallback before Japanese faces;
+macOS fractional glyph placement restored. Verified complete Simplified Chinese
+UI ideograph coverage, theme tests, Home/Preferences rendering and installed-app
+relaunch. No change to PDF content font embedding or upstream parity claims.
+See `docs/local-font-fix.md` for build, verification and rollback details.
+
+
+## Local selected-text translation (2026-10-11)
+
+| Local extension | Implementation | Scope |
+|---|---|---|
+| Automatic Chinese translation | Selection release + 300 ms debounce, background translation, in-reader window, copy/retry, menu and Cmd+Shift+T, headless `text_translate` | Existing v0.5.0 font fix retained. DeepSeek Flash API with selection-image verification and local formula typesetting; desktop only, no offline/OCR claim. |
+
+Validation and installation details: `docs/local-selection-translation.md`.
+
+- **2026-10-11 (local fork, M3):** Automatic selection translation uses DeepSeek Flash with selection-image verification and local LaTeX equation rendering; local macOS font fixes retained. No offline translation or scanned-image selection claimed.
+
+- Local fork: rectangle screenshot translation (DeepSeek vision), persisted custom shortcut in Preferences, and outside-click dismissal for screenshot/selected-text popups.

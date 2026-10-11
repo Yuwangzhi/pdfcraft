@@ -152,7 +152,14 @@ pub fn installed_font_definitions(prefer_hans: bool) -> FontDefinitions {
     if let Some(data) = crate::system_fonts::fallback() {
         fonts.font_data.insert(SYSTEM_FALLBACK.to_owned(), data);
         for stack in fonts.families.values_mut() {
-            stack.push(SYSTEM_FALLBACK.to_owned());
+            if std::env::var_os("PDFCRAFT_UI_FONT").is_some() {
+                // Keep Latin faces and weight choices, but use one Chinese face before
+                // the embedded Japanese fallback to avoid mixed baselines and tofu.
+                let at = stack.iter().position(|n| pdfcraft_fonts::CRAFT_FONTS.iter().any(|f| f.name() == *n)).unwrap_or(stack.len());
+                stack.insert(at, SYSTEM_FALLBACK.to_owned());
+            } else {
+                stack.push(SYSTEM_FALLBACK.to_owned());
+            }
         }
     }
     fonts
@@ -262,7 +269,9 @@ pub fn apply(ctx: &egui::Context, kind: ThemeKind) {
     // gamma darkens the antialiased edges of dark text (egui's default is linear, which reads thin
     // and grey next to the system's text); the dark theme keeps egui's own curve. At 200 % both
     // make little difference.
-    v.text_options.subpixel_binning = false;
+    // On macOS, preserve fractional glyph placement instead of snapping every
+    // glyph to whole pixels, which makes small Latin text look uneven.
+    v.text_options.subpixel_binning = cfg!(target_os = "macos");
     if !t.dark() {
         v.text_options.color_transfer_function = egui::epaint::FontColorTransferFunction::Gamma(0.75);
     }

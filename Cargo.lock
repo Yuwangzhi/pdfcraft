@@ -2747,6 +2747,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "latex-rust"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8094b939c8af51f9c7d08256ffa607b743e24d466d9a0ccc602dc748c911e54"
+dependencies = [
+ "tiny-skia",
+ "ttf-parser",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3677,10 +3687,12 @@ dependencies = [
 name = "pdfcraft-engine"
 version = "0.5.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "icu_properties",
  "idna",
  "image",
+ "latex-rust",
  "pdfcraft-a11y",
  "pdfcraft-annot",
  "pdfcraft-compare",
@@ -3704,6 +3716,7 @@ dependencies = [
  "pdfcraft-xfa",
  "pdfcraft-xfdf",
  "png 0.18.1",
+ "serde_json",
  "thiserror 2.0.21",
  "url",
 ]
@@ -5728,6 +5741,12 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
 ]
+
+[[package]]
+name = "ttf-parser"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
 name = "type-map"

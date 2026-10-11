@@ -49,6 +49,8 @@ mod search_ui;
 mod sign_ui;
 mod stamps_ui;
 mod standards_ui;
+mod translation_shortcut;
+mod translation_ui;
 mod zoom_snap;
 /// Header & footer / watermark / background dialog types (tests and automation).
 pub mod marks {
@@ -205,6 +207,8 @@ pub enum QuickTool {
     MarqueeZoom,
     /// Edit ▸ Take a Snapshot.
     Snapshot,
+    /// Translate a rectangular page crop.
+    TranslateRegion,
 }
 
 /// Files dropped on a document's page grid.
@@ -404,6 +408,7 @@ pub struct PdfCraftApp {
     pub recent: Vec<RecentFile>,
     /// Preferences: reopen the files that were open when PdfCraft last closed (#442).
     pub reopen_last_session: bool,
+    pub(crate) translation_shortcut: crate::translation_shortcut::ShortcutSetting,
     /// The files open when PdfCraft last closed, read from the settings for
     /// [`PdfCraftApp::reopen_last_files`].
     pub last_session: last_session::LastSession,
@@ -678,6 +683,7 @@ impl PdfCraftApp {
             all_tools_expanded: false,
             recent: Vec::new(),
             reopen_last_session: false,
+            translation_shortcut: Default::default(),
             last_session: Default::default(),
             quit_session: None,
             pinned: Default::default(),
@@ -1284,6 +1290,7 @@ impl PdfCraftApp {
         serde_json::json!({
             "recent": self.recent,
             "reopen_last_session": self.reopen_last_session,
+            "translation_shortcut": self.translation_shortcut.value,
             // Kept only while the preference is on.
             "last_session": self.reopen_last_session.then(|| self.session_to_save()),
             "pinned_folders": self.pinned.folders,
@@ -1337,6 +1344,9 @@ impl PdfCraftApp {
             #[cfg(not(target_arch = "wasm32"))]
             let r: Vec<RecentFile> = r.into_iter().filter(|f| std::path::Path::new(&f.path).exists()).collect();
             self.recent = r;
+        }
+        if let Some(value) = v["translation_shortcut"].as_str() {
+            let _ = self.translation_shortcut.set(value);
         }
         if let Some(on) = v["reopen_last_session"].as_bool() {
             self.reopen_last_session = on;
@@ -1555,6 +1565,7 @@ impl PdfCraftApp {
                 }
                 v.set_cover(on);
             }
+            ("translation-shortcut", _) => self.translation_shortcut.set(value)?,
             ("default-layout", _) => {
                 self.view_defaults.layout = canvas::PageLayout::try_parse(value).ok_or("default-layout must be continuous, single or two-up")?;
             }
@@ -1621,6 +1632,7 @@ impl PdfCraftApp {
                     "sign" => QuickTool::SignArea { certify: false },
                     "marquee-zoom" => QuickTool::MarqueeZoom,
                     "snapshot" => QuickTool::Snapshot,
+                    "translate-region" => QuickTool::TranslateRegion,
                     "certify" => QuickTool::SignArea { certify: true },
                     custom if custom.starts_with("custom-stamp-") => {
                         let i: usize = custom[13..].parse().map_err(|_| format!("bad stamp {custom}"))?;
@@ -1690,6 +1702,18 @@ impl PdfCraftApp {
             && view.auto_scroll.escape(ctx)
         {
             return;
+        }
+        if self.translation_shortcut.capturing {
+            return;
+        }
+        if self.dialog.is_none() && !self.palette_open && !ctx.egui_wants_keyboard_input() && self.translation_shortcut.consume(ctx) {
+            self.execute("edit.translate_region");
+        }
+        if self.quick_tool == QuickTool::TranslateRegion && ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.quick_tool = QuickTool::Select;
+            if let Some(view) = self.active.and_then(|i| self.views.get_mut(i)) {
+                view.marquee = None;
+            }
         }
         self.registry_shortcuts(ctx);
         if self.full_screen && ctx.input(|i| i.key_pressed(Key::Escape)) {
@@ -1950,6 +1974,15 @@ impl eframe::App for PdfCraftApp {
             None => home::show(self, ui),
             Some(i) => canvas::document_area(self, i, ui),
         });
+        if let Some(view) = self.active.and_then(|i| self.views.get_mut(i)) {
+            let selection = view.translation_key();
+            let anchor = if view.organize { None } else { view.translation_anchor() };
+            if view.translation.show(&ctx, view.id.0, selection, anchor)
+                && let Some(doc) = self.session.get(view.id)
+            {
+                view.start_translation(&ctx, doc);
+            }
+        }
         self.process_pending_edits();
         palette::show(self, &ctx);
         dialogs::show(self, &ctx);

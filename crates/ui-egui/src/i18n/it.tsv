@@ -2142,3 +2142,5 @@ signature pad	Type	Digita
 	The selected fields could not be found. Select them again.	I campi selezionati non sono stati trovati. Selezionali di nuovo.
 	The field {name} no longer exists.	Il campo {name} non esiste più.
 	A selected field has no widget on any page, so the fields can't be edited together.	Un campo selezionato non ha widget in nessuna pagina, quindi i campi non possono essere modificati insieme.
+	Translate selection to Chinese	Traduci la selezione in cinese
+	Translate screenshot to Chinese	Traduci schermata in cinese

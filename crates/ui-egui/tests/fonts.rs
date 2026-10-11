@@ -128,6 +128,9 @@ fn telugu_ui_text_uses_craft_fonts() {
 /// with it and Arabic text has glyphs; the embedded-only definitions never name it.
 #[test]
 fn system_fallback_fills_missing_scripts() {
+    if std::env::var_os("PDFCRAFT_UI_FONT").is_some() {
+        return; // The local CJK override has its own coverage test below.
+    }
     assert!(!theme::font_definitions().font_data.contains_key(theme::SYSTEM_FALLBACK));
     let defs = theme::installed_font_definitions(false);
     if !defs.font_data.contains_key(theme::SYSTEM_FALLBACK) {
@@ -196,5 +199,35 @@ fn primary_ui_fonts_cover_latin_and_cyrillic_catalogs() {
             missing.dedup();
             assert!(missing.is_empty(), "{code}: {name} lacks {missing:?}");
         }
+    }
+}
+
+/// The shipped Chinese catalog must have actual glyphs, not just translated strings.
+/// Run with the local system-font override used by the installed macOS build.
+#[test]
+fn local_chinese_override_covers_ui_catalog_and_latin() {
+    if std::env::var_os("PDFCRAFT_UI_FONT").is_none() {
+        return;
+    }
+    let defs = theme::installed_font_definitions(true);
+    assert!(defs.font_data.contains_key(theme::SYSTEM_FALLBACK));
+    for stack in defs.families.values() {
+        let system = stack.iter().position(|n| n == theme::SYSTEM_FALLBACK).unwrap();
+        if let Some(japanese) = stack.iter().position(|n| n.starts_with("BIZ UDPGothic")) {
+            assert!(system < japanese);
+        }
+    }
+    let mut text = String::from("PdfCraft PDF OCR JavaScript 0123456789 简体中文欢迎编辑签名首选项");
+    for line in include_str!("../src/i18n/zh-hans.tsv").lines().filter(|l| !l.starts_with('#')) {
+        if let Some(translated) = line.split('\t').nth(2) {
+            text.extend(translated.chars().filter(|c| ('\u{3400}'..='\u{9fff}').contains(c)));
+        }
+    }
+    let mut fonts = Fonts::new(TextOptions::default(), defs);
+    for id in families() {
+        assert!(fonts.has_glyphs(&id, &text), "{id:?} has missing Chinese UI glyphs");
+    }
+    for width in layout_widths(&mut fonts, "欢迎使用 PdfCraft · 编辑 PDF") {
+        assert!(width.is_finite() && width > 80.0);
     }
 }

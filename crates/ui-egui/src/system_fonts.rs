@@ -1,8 +1,8 @@
 //! The last-resort interface font: one face already installed on this machine.
 //!
-//! The embedded faces (Inter, egui's defaults, craft-fonts) come first in every family; this one
-//! only draws characters none of them has, such as an Arabic file name in a build without
-//! craft-fonts. It is read at runtime and never embedded or shipped (AGENTS.md §1.4), and
+//! Normally this is a last-resort Arabic fallback. A local `PDFCRAFT_UI_FONT` override
+//! supplies a complete Chinese face before the embedded Japanese faces, keeping Latin
+//! weight choices intact. It is read at runtime and never embedded or shipped, and
 //! `PDFCRAFT_SYSTEM_FONTS=0` turns it off (published screenshots do).
 
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 use egui::FontData;
 
 /// Larger files are not read: a font path is still untrusted input.
-const MAX_BYTES: u64 = 32 << 20;
+const MAX_BYTES: u64 = 128 << 20;
 /// Faces tried in a collection (`.ttc`).
 const MAX_FACES: u32 = 16;
 /// Arabic letter alef: the face must have it to be worth loading.
@@ -26,6 +26,13 @@ pub fn fallback() -> Option<Arc<FontData>> {
 fn load() -> Option<Arc<FontData>> {
     if std::env::var_os("PDFCRAFT_SYSTEM_FONTS").is_some_and(|v| v == "0") {
         return None;
+    }
+    // Local UI-only override. Never embedded in the binary or written into a PDF.
+    if let Some(path) = std::env::var_os("PDFCRAFT_UI_FONT") {
+        let index = std::env::var("PDFCRAFT_UI_FONT_INDEX").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+        if let Some(data) = read_ui_font(Path::new(&path), index) {
+            return Some(data);
+        }
     }
     candidates().iter().find_map(|path| read(path))
 }
@@ -64,6 +71,24 @@ fn read(path: &Path) -> Option<Arc<FontData>> {
     let mut data = FontData::from_owned(bytes);
     data.index = index;
     log::info!("interface font fallback: {}", path.display());
+    Some(Arc::new(data))
+}
+
+/// Read a local UI face only if it covers both Latin and the Simplified Chinese
+/// characters missing from the official release. Invalid overrides keep the stock fallback.
+fn read_ui_font(path: &Path, index: u32) -> Option<Arc<FontData>> {
+    use skrifa::MetadataProvider as _;
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_BYTES || index >= 64 {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let font = skrifa::FontRef::from_index(&bytes, index).ok()?;
+    if !"PdfCraft简体中文欢迎编辑签名首选项".chars().all(|c| font.charmap().map(c).is_some()) {
+        return None;
+    }
+    let mut data = FontData::from_owned(bytes);
+    data.index = index;
     Some(Arc::new(data))
 }
 

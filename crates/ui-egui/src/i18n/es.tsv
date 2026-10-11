@@ -2049,3 +2049,5 @@
 	The selected fields could not be found. Select them again.	No se encontraron los campos seleccionados. Vuelve a seleccionarlos.
 	The field {name} no longer exists.	El campo {name} ya no existe.
 	A selected field has no widget on any page, so the fields can't be edited together.	Un campo seleccionado no tiene ningún widget en ninguna página, así que los campos no se pueden editar juntos.
+	Translate selection to Chinese	Traducir la selección al chino
+	Translate screenshot to Chinese	Traducir captura al chino

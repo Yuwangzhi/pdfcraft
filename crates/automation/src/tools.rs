@@ -153,6 +153,14 @@ pub fn tools() -> Vec<ToolDef> {
         t("text_extract", "Extract text", "Extract the text of some or all pages, in reading order.")
             .ro()
             .with(schema(json!({ "doc": doc(), "pages": pages("to extract (default: all)") }), &["doc"])),
+        t("text_render_math", "Render translated math", "Locally typeset LaTeX formulas delimited by \\( \\), \\[ \\], $ or $$ in translated prose. Returns ordered text and formula PNGs. No network or PDF changes.")
+            .ro().with(schema(json!({"text": {"type":"string", "maxLength": 32768}}), &["text"])),
+        t("region_translate", "Translate screenshot to Chinese", "Translate a rendered page crop with DeepSeek Flash, including formulas. Requires explicit network consent. No full PDF is uploaded or changed.")
+            .ro().cmd("edit.translate_region")
+            .with(schema(json!({"doc": doc(), "page": {"type":"integer", "minimum":1}, "rect": {"type":"array", "items":{"type":"number"}, "minItems":4, "maxItems":4}, "allow_network":{"type":"boolean"}}), &["doc", "page", "rect", "allow_network"])),
+        t("text_translate", "Translate text to Chinese", "Translate supplied text with DeepSeek Flash. Optional doc, page and rect send a selection crop to verify formulas. Requires allow_network=true and a configured API key. No whole PDF is uploaded or changed.")
+            .ro().cmd("edit.translate")
+            .with(schema(json!({ "text": { "type": "string", "minLength": 1, "maxLength": 3000 }, "allow_network": { "type": "boolean" }, "doc": doc(), "page": { "type": "integer", "minimum": 1 }, "rect": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4, "description": "Selection [x0,y0,x1,y1] in top-left page points; requires doc and page." } }), &["text", "allow_network"])),
         t("text_find", "Find text", "Find a phrase (case-insensitive, whitespace-normalised) and return each match with its page and line rectangles in points (origin top-left).")
             .ro()
             .cmd("edit.find")
