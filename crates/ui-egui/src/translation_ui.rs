@@ -1,4 +1,4 @@
-//! A document-local translation window; network work never blocks the UI thread.
+//! A document-local translation sidebar; network work never blocks the UI thread.
 
 use crate::translation_flow::{RenderedBlock, typeset};
 type Reply = Result<(String, Vec<RenderedBlock>), String>;
@@ -19,15 +19,16 @@ pub(crate) struct Translation {
 impl Translation {
     pub(crate) fn start(&mut self, ctx: &egui::Context, text: String, image: Option<pdfcraft_engine::translation::SelectionImage>) {
         self.open = true;
-        if self.pending.is_some() {
-            self.queued = Some((text, image));
-            return;
-        }
-        self.source = text;
+        ctx.request_repaint();
+        self.source = text.clone();
         self.source_expanded = false;
         self.image = image.clone();
         self.result = None;
         self.parts.clear();
+        if self.pending.is_some() {
+            self.queued = Some((text, image));
+            return;
+        }
         let text = match if self.source.trim().is_empty() && image.is_some() {
             Ok(String::new())
         } else {
@@ -59,18 +60,24 @@ impl Translation {
         }
     }
 
-    pub(crate) fn show(&mut self, ctx: &egui::Context, doc: u64, selection: Option<(usize, usize, usize)>, anchor: Option<egui::Pos2>) -> bool {
+    pub(crate) fn update(&mut self, ctx: &egui::Context, selection: Option<(usize, usize, usize)>) -> bool {
         if let Some(rx) = &self.pending {
             match rx.try_recv() {
                 Ok(result) => {
-                    self.result = Some(result.map(|(text, parts)| {
-                        self.parts = parts;
-                        text
-                    }));
+                    // A newer selection owns the sidebar immediately. Never flash an
+                    // obsolete response while its replacement waits for the serial worker.
+                    if self.queued.is_none() {
+                        self.result = Some(result.map(|(text, parts)| {
+                            self.parts = parts;
+                            text
+                        }));
+                    }
                     self.pending = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.result = Some(Err("翻译任务中断，请重试。".into()));
+                    if self.queued.is_none() {
+                        self.result = Some(Err("翻译任务中断，请重试。".into()));
+                    }
                     self.pending = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
@@ -82,33 +89,56 @@ impl Translation {
             self.start(ctx, text, image);
         }
         let (now, pointer_down) = ctx.input(|i| (i.time, i.pointer.any_down()));
-        let should_start = self.trigger.observe(selection, now, pointer_down, self.pending.is_some()).is_some();
+        let should_start = self.trigger.observe(selection, now, pointer_down).is_some();
         if self.trigger.due {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.open = false;
             self.queued = None;
+            self.trigger.due = false;
+            ctx.request_repaint();
         }
+        should_start
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        self.open
+    }
+
+    pub(crate) fn show(&mut self, ui: &mut egui::Ui, doc: u64) {
         if !self.open {
-            return should_start;
+            return;
         }
+        let ctx = ui.ctx().clone();
         let mut open = self.open;
         let mut retry = false;
-        let window = egui::Window::new(if self.source.is_empty() { "截图翻译" } else { "划词翻译" })
-            .id(egui::Id::new(("translation-window", doc)))
-            .open(&mut open)
-            .default_width(560.0)
-            .min_width(320.0)
-            .default_pos(anchor.map(|p| p + egui::vec2(18.0, 22.0)).unwrap_or(egui::pos2(120.0, 120.0)))
+        let t = crate::theme::Tokens::get(&ctx);
+        egui::Panel::right(egui::Id::new(("translation-panel", doc)))
+            .default_size(420.0)
+            .size_range(300.0..=620.0)
             .resizable(true)
-            .collapsible(false)
-            .show(ctx, |ui| {
+            .frame(
+                egui::Frame::NONE
+                    .fill(t.panel)
+                    .inner_margin(egui::Margin { left: 16, right: 16, top: 12, bottom: 12 })
+                    .stroke(egui::Stroke::new(1.0, t.divider)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading(if self.source.is_empty() { "截图翻译" } else { "划词翻译" });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if crate::icons::button(ui, "x", 26.0, false, "收起翻译栏").clicked() {
+                            open = false;
+                        }
+                    });
+                });
                 ui.weak("DeepSeek Flash · 学术翻译 → 简体中文");
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .id_salt("translation-content")
-                    .max_height((ctx.content_rect().height() * 0.72).clamp(240.0, 680.0))
+                    .max_height((ui.available_height() - 76.0).max(80.0))
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if !self.source.is_empty() {
                             let source = egui::CollapsingHeader::new("查看原文").open(Some(self.source_expanded)).show(ui, |ui| {
@@ -144,29 +174,26 @@ impl Translation {
                     if ui.add_enabled(self.pending.is_none(), egui::Button::new("重新翻译")).clicked() {
                         retry = true;
                     }
-                    ui.weak(if self.source.is_empty() {
-                        "仅发送框选截图"
-                    } else if self.image.is_some() {
-                        "文字 + 选区截图核对公式"
-                    } else {
-                        "仅发送所选文字"
-                    });
+                });
+                ui.weak(if self.source.is_empty() {
+                    "仅发送框选截图"
+                } else if self.image.is_some() {
+                    "文字 + 选区截图核对公式"
+                } else {
+                    "仅发送所选文字"
                 });
             });
-        if let Some(window) = window
-            && ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !window.response.rect.contains(p)))
-        {
-            open = false;
-            self.trigger.due = false;
-        }
         if !open {
             self.queued = None;
+            self.trigger.due = false;
         }
         self.open = open;
         if retry {
-            self.start(ctx, self.source.clone(), self.image.clone());
+            self.start(&ctx, self.source.clone(), self.image.clone());
         }
-        should_start
+        if !self.open {
+            ctx.request_repaint();
+        }
     }
 }
 
@@ -180,7 +207,7 @@ struct SelectionTrigger<K> {
 }
 
 impl<K: PartialEq + Clone> SelectionTrigger<K> {
-    fn observe(&mut self, text: Option<K>, now: f64, pointer_down: bool, busy: bool) -> Option<K> {
+    fn observe(&mut self, text: Option<K>, now: f64, pointer_down: bool) -> Option<K> {
         if text != self.observed {
             self.observed = text;
             self.deadline = now + 0.3;
@@ -189,7 +216,7 @@ impl<K: PartialEq + Clone> SelectionTrigger<K> {
         if pointer_down {
             self.deadline = now + 0.3;
         }
-        if self.due && !pointer_down && !busy && now >= self.deadline {
+        if self.due && !pointer_down && now >= self.deadline {
             self.due = false;
             return self.observed.clone();
         }
@@ -210,7 +237,8 @@ mod tests {
             };
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 900.0)).build_ui_state(
             |ui, state: &mut Translation| {
-                state.show(ui.ctx(), 1, None, None);
+                state.update(ui.ctx(), None);
+                state.show(ui, 1);
             },
             state,
         );
@@ -226,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn translation_popups_close_on_outside_press_and_stay_closed() {
+    fn translation_sidebar_docks_right_and_stays_open_on_outside_click() {
         for source in ["selected text", ""] {
             let ctx = egui::Context::default();
             let mut translation = Translation { open: true, source: source.into(), result: Some(Ok("译文".into())), ..Default::default() };
@@ -237,7 +265,11 @@ mod tests {
                         ..Default::default()
                     },
                     |ui| {
-                        translation.show(ui.ctx(), 1, None, None);
+                        translation.update(ui.ctx(), None);
+                        translation.show(ui, 1);
+                        let remaining = ui.available_rect_before_wrap();
+                        assert!(remaining.right() < 900.0, "sidebar reserves space beside the page");
+                        assert!(remaining.left() < 10.0, "sidebar docks to the right");
                     },
                 );
             }
@@ -245,7 +277,7 @@ mod tests {
             let _ = ctx.run_ui(
                 egui::RawInput {
                     events: vec![egui::Event::PointerButton {
-                        pos: egui::pos2(1100.0, 800.0),
+                        pos: egui::pos2(100.0, 800.0),
                         button: egui::PointerButton::Primary,
                         pressed: true,
                         modifiers: egui::Modifiers::NONE,
@@ -253,31 +285,93 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    translation.show(ui.ctx(), 1, None, None);
+                    translation.update(ui.ctx(), None);
+                    translation.show(ui, 1);
                 },
             );
-            assert!(!translation.open, "{source}");
+            assert!(translation.open, "a press must not shift the page during selection");
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::PointerButton {
+                        pos: egui::pos2(100.0, 800.0),
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                    ..Default::default()
+                },
+                |ui| {
+                    translation.show(ui, 1);
+                },
+            );
+            assert!(translation.open, "outside clicks keep the docked translation visible: {source}");
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-                translation.show(ui.ctx(), 1, None, None);
+                translation.update(ui.ctx(), None);
+                translation.show(ui, 1);
             });
+            assert!(translation.open);
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                    ..Default::default()
+                },
+                |ui| {
+                    translation.update(ui.ctx(), None);
+                    translation.show(ui, 1);
+                },
+            );
             assert!(!translation.open);
         }
     }
 
     #[test]
+    fn a_new_translation_replaces_content_and_discards_the_obsolete_reply() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut translation = Translation {
+            open: true,
+            source: "previous".into(),
+            source_expanded: true,
+            result: Some(Ok("old translation".into())),
+            parts: typeset("old translation", &ctx),
+            pending: Some(rx),
+            ..Default::default()
+        };
+        translation.start(&ctx, "new selection".into(), None);
+        assert_eq!(translation.source, "new selection");
+        assert!(translation.result.is_none() && translation.parts.is_empty());
+        assert!(!translation.source_expanded);
+        // The latest request wins; whitespace exercises initialization without network IO.
+        translation.start(&ctx, " ".into(), None);
+        assert_eq!(translation.queued.as_ref().unwrap().0, " ");
+        tx.send(Ok(("obsolete response".into(), typeset("obsolete response", &ctx)))).unwrap();
+        translation.update(&ctx, None);
+        assert!(matches!(translation.result, Some(Err(_))));
+        assert!(translation.parts.is_empty());
+        assert!(translation.pending.is_none() && translation.queued.is_none());
+        assert_eq!(translation.source, " ");
+    }
+
+    #[test]
     fn automatic_translation_waits_for_release_and_queues_latest_selection() {
         let mut t = SelectionTrigger::<String>::default();
-        assert!(t.observe(Some("first".into()), 0.0, true, false).is_none());
-        assert!(t.observe(Some("first sentence".into()), 0.5, true, false).is_none());
-        assert!(t.observe(Some("first sentence".into()), 0.6, false, false).is_none());
-        assert_eq!(t.observe(Some("first sentence".into()), 0.9, false, false).as_deref(), Some("first sentence"));
-        assert!(t.observe(Some("first sentence".into()), 1.2, false, false).is_none());
-        assert!(t.observe(Some("second".into()), 1.5, false, true).is_none());
-        assert!(t.observe(Some("latest".into()), 2.0, false, true).is_none());
-        assert!(t.observe(Some("latest".into()), 2.5, false, true).is_none());
-        assert_eq!(t.observe(Some("latest".into()), 3.0, false, false).as_deref(), Some("latest"));
-        assert!(t.observe(None, 4.0, false, false).is_none());
-        assert!(t.observe(Some("latest".into()), 4.5, false, false).is_none());
-        assert_eq!(t.observe(Some("latest".into()), 5.0, false, false).as_deref(), Some("latest"));
+        assert!(t.observe(Some("first".into()), 0.0, true).is_none());
+        assert!(t.observe(Some("first sentence".into()), 0.5, true).is_none());
+        assert!(t.observe(Some("first sentence".into()), 0.6, false).is_none());
+        assert_eq!(t.observe(Some("first sentence".into()), 0.9, false).as_deref(), Some("first sentence"));
+        assert!(t.observe(Some("first sentence".into()), 1.2, false).is_none());
+        assert!(t.observe(Some("second".into()), 1.5, false).is_none());
+        assert!(t.observe(Some("latest".into()), 2.0, false).is_none());
+        assert_eq!(t.observe(Some("latest".into()), 2.5, false).as_deref(), Some("latest"));
+        assert!(t.observe(Some("latest".into()), 3.0, false).is_none());
+        assert!(t.observe(None, 4.0, false).is_none());
+        assert!(t.observe(Some("latest".into()), 4.5, false).is_none());
+        assert_eq!(t.observe(Some("latest".into()), 5.0, false).as_deref(), Some("latest"));
     }
 }

@@ -817,11 +817,6 @@ impl DocView {
         true
     }
 
-    pub(crate) fn translation_anchor(&self) -> Option<Pos2> {
-        let selection = self.selection?;
-        self.glyph_screen_pos(selection.page, selection.head).filter(|p| self.viewport_screen.contains(*p))
-    }
-
     pub fn thumb(&self, page: usize) -> Option<&TextureHandle> {
         self.thumbs.get(&page).map(|t| &t.tex)
     }

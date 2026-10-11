@@ -67,6 +67,11 @@ fn quick_clicks_select_a_word_then_the_line_then_the_page() {
     }
     // A pause ends the run: the next double-click selects a word again.
     h.run_steps(60);
+    // Automatic translation now docks beside the page. Locate the word in the
+    // current viewport rather than clicking its position before the sidebar opened.
+    let at = h.state().views[0].glyph_screen_pos(0, 5).expect("word in the current viewport");
+    h.hover_at(at);
+    h.run_steps(1);
     click(&mut h, at);
     click(&mut h, at);
     assert_eq!(h.state().views[0].selected_text().as_deref(), Some("quick"));

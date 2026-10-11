@@ -1962,7 +1962,12 @@ impl eframe::App for PdfCraftApp {
         chrome::mode_bar(self, ui);
         if self.active.is_some() {
             chrome::right_rail(self, ui);
-            if self.right.is_some() && self.mode != Mode::Read {
+            let translation_open = self.active.and_then(|i| self.views.get(i)).is_some_and(|v| v.translation.is_open());
+            if translation_open {
+                if let Some(view) = self.active.and_then(|i| self.views.get_mut(i)) {
+                    view.translation.show(ui, view.id.0);
+                }
+            } else if self.right.is_some() && self.mode != Mode::Read {
                 panels::right_panel(self, ui);
             }
         }
@@ -1977,8 +1982,7 @@ impl eframe::App for PdfCraftApp {
         });
         if let Some(view) = self.active.and_then(|i| self.views.get_mut(i)) {
             let selection = view.translation_key();
-            let anchor = if view.organize { None } else { view.translation_anchor() };
-            if view.translation.show(&ctx, view.id.0, selection, anchor)
+            if view.translation.update(&ctx, selection)
                 && let Some(doc) = self.session.get(view.id)
             {
                 view.start_translation(&ctx, doc);
