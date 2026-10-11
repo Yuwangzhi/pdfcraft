@@ -165,15 +165,24 @@ impl Automation {
                     return Err(Args::wrong("text", "at most 32768 bytes"));
                 }
                 let mut output = Vec::new();
-                for part in pdfcraft_engine::translation_math::render(text) {
-                    match part {
-                        pdfcraft_engine::translation_math::Part::Text(text) => output.push(Content::Json(json!({"text": text}))),
-                        pdfcraft_engine::translation_math::Part::Math { latex, display, png } => {
-                            let data = png.map_err(failed)?;
-                            let reader = png::Decoder::new(std::io::Cursor::new(&data)).read_info().map_err(failed)?;
-                            let (width, height) = (reader.info().width, reader.info().height);
-                            output.push(Content::Json(json!({"latex": latex,"display": display})));
-                            output.push(Content::Png { data, width, height });
+                for (index, block) in pdfcraft_engine::translation_math::document(text).into_iter().enumerate() {
+                    let kind = match block.kind {
+                        pdfcraft_engine::translation_math::BlockKind::Paragraph => "paragraph",
+                        pdfcraft_engine::translation_math::BlockKind::Heading => "heading",
+                        pdfcraft_engine::translation_math::BlockKind::ListItem(_) => "list_item",
+                    };
+                    for part in block.parts {
+                        match part {
+                            pdfcraft_engine::translation_math::Part::Text(text) => {
+                                output.push(Content::Json(json!({"text": text, "block":index, "kind":kind})))
+                            }
+                            pdfcraft_engine::translation_math::Part::Math { latex, display, png } => {
+                                let data = png.map_err(failed)?;
+                                let reader = png::Decoder::new(std::io::Cursor::new(&data)).read_info().map_err(failed)?;
+                                let (width, height) = (reader.info().width, reader.info().height);
+                                output.push(Content::Json(json!({"latex":latex,"display":display,"block":index,"kind":kind})));
+                                output.push(Content::Png { data, width, height });
+                            }
                         }
                     }
                 }

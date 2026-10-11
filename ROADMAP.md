@@ -350,3 +350,5 @@ Validation and installation details: `docs/local-selection-translation.md`.
 - **2026-10-11 (local fork, M3):** Automatic selection translation uses DeepSeek Flash with selection-image verification and local LaTeX equation rendering; local macOS font fixes retained. No offline translation or scanned-image selection claimed.
 
 - Local fork: rectangle screenshot translation (DeepSeek vision), persisted custom shortcut in Preferences, and outside-click dismissal for screenshot/selected-text popups.
+
+- Local translation reflow: semantic paragraphs/headings/lists, inline math in flowing prose, separate centered display equations, and width-responsive popup layout; validated on the user-authorized current PDF.

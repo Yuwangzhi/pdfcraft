@@ -9,8 +9,9 @@
 - 使用 DeepSeek `deepseek-flash`，关闭思考模式。按 2026-10-11 官方接口说明，该名称对应 V4.1 Flash；旧 `deepseek-v4-flash` 请求也已转向这一模型。
 - 向 DeepSeek 发送所选文字及其边界附近的截图（边缘留 4 pt）。截图用于核对 PDF 提取时容易错乱的变量、上下标、分式、求和范围和公式编号；不上传 PDF 文件、文件名或路径。跨行选区的矩形可能包含周边文字。
 - 单次最多选择 3000 个字符。需要网络和有余额的 API 账户，调用按 DeepSeek 规则计费。
+- 译文按语义重新排版：标题、段落、列表保持层次；PDF 分栏的硬换行合并为连续段落。行内公式与文字混排，原文独立公式居中显示，保留编号；调整弹窗宽度会自动重排。每次新译文的原文默认折叠，点击“查看原文”才手动展开核对。
 - 译文中的数学式在本机通过 `latex-rust` 与 OFL 许可的 STIX Two Math 字体排版，显示为清晰公式。渲染结果在弹窗存续期间缓存，不会每帧重复排版；长公式可横向滚动。复制译文保留 LaTeX，便于粘贴到论文。
-- 暂不支持的公式会显示明确提示，可展开查看表达式。不会把错误渲染伪装成正确公式。模型仍可能误读复杂公式，请与原文核对。
+- 暂不支持的公式会显示明确提示，悬停可查看表达式。不会把错误渲染伪装成正确公式。模型仍可能误读复杂公式，请与原文核对。
 - 划词翻译依赖 PDF 文字层；扫描页或图片内容可直接用下方的截图翻译，无须先运行 OCR。
 
 ## 本机配置（macOS）
@@ -44,11 +45,11 @@ pdfcraft-cli run text_translate 'text=The recurrence is x_{t+1}=a x_t.' allow_ne
 pdfcraft-cli run text_render_math 'text=递推关系：\[x_{t+1}=a x_t\]' --out formula.png
 ```
 
-`text_render_math` 完全离线，返回按原顺序排列的文字、公式元信息和 PNG。引擎接口为 `translation::to_chinese_with_image` 和 `translation_math::render`。
+`text_render_math` 完全离线，返回按原顺序排列的文字、公式元信息和 PNG，元信息的 `block` / `kind` 标记段落、标题及列表。引擎接口为 `translation::to_chinese_with_image` 和 `translation_math::document`（语义块及数学图像）；`translation_math::render` 保留底层分段接口。
 
 ## 验证
 
-2026-10-11 已在隔离设置的原生测试应用中划选自制英文及数学样例：中文自动出现；公式中的分式、求和上下限、希腊字母、下标和编号准确恢复并实际排版显示。源文档保持未修改。测试没有上传用户研究文档。
+2026-10-11 已在隔离设置的原生测试应用中划选自制英文及数学样例：中文自动出现；公式中的分式、求和上下限、希腊字母、下标和编号准确恢复并实际排版显示。源文档保持未修改。这一轮初始测试只使用自制样例。
 
 回归测试覆盖输入边界、错误响应、公式原文保留、网络显式启用、自动触发去抖及最新选区队列、公式离线渲染与不支持语法。真实 API 测试是显式启用的 ignored test，内容只有自制样例。
 
@@ -62,3 +63,5 @@ pdfcraft-cli run text_render_math 'text=递推关系：\[x_{t+1}=a x_t\]' --out 
 - 框选模式按 Esc 退出，完成一次截图后自动回到文字选择工具。
 - 自动化：`region_translate` 接受 `doc`、从 1 开始的 `page`、页面点坐标 `rect: [x0,y0,x1,y1]` 和 `allow_network: true`，无须 PDF 文字层。
 - 控制接口可用 `set key=translation-shortcut value=Alt+Shift+T` 设置快捷键，`command id=edit.translate_region` 启动框选。
+
+2026-10-11 排版回归：经用户授权，用当前打开论文的第 3 页实测截图及划词译文，检查标题、行内变量、独立公式与编号，并调整弹窗宽度检查重排。测试材料和截图仅保存在本机，不加入仓库。

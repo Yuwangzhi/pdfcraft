@@ -2623,6 +2623,9 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     }
     if let Some(done) = app.views[index].marquee_done.take() {
         app.finish_marquee(index, done);
+        if tool == QuickTool::TranslateRegion {
+            tool = app.quick_tool;
+        }
     }
     // A signature rectangle was drawn, or an empty signature field clicked.
     let drawn = app.views[index].sign.drawn.take();

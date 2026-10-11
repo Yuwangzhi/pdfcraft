@@ -49,6 +49,7 @@ mod search_ui;
 mod sign_ui;
 mod stamps_ui;
 mod standards_ui;
+mod translation_flow;
 mod translation_shortcut;
 mod translation_ui;
 mod zoom_snap;

@@ -1,33 +1,7 @@
 //! A document-local translation window; network work never blocks the UI thread.
 
-enum RenderedPart {
-    Text(String),
-    Math { latex: String, texture: Result<egui::TextureHandle, String> },
-}
-type Reply = Result<(String, Vec<RenderedPart>), String>;
-
-fn typeset(text: &str, ctx: &egui::Context) -> Vec<RenderedPart> {
-    pdfcraft_engine::translation_math::render(text)
-        .into_iter()
-        .enumerate()
-        .map(|(i, part)| match part {
-            pdfcraft_engine::translation_math::Part::Text(text) => RenderedPart::Text(text),
-            pdfcraft_engine::translation_math::Part::Math { latex, png, .. } => {
-                let texture = png.and_then(|bytes| {
-                    let mut image = image::load_from_memory(&bytes).map_err(|_| "公式图像无法读取。".to_string())?.to_rgba8();
-                    for pixel in image.pixels_mut() {
-                        pixel.0[0] = 255;
-                        pixel.0[1] = 255;
-                        pixel.0[2] = 255;
-                    }
-                    let color = egui::ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw());
-                    Ok(ctx.load_texture(format!("translation-math-{i}"), color, egui::TextureOptions::LINEAR))
-                });
-                RenderedPart::Math { latex, texture }
-            }
-        })
-        .collect()
-}
+use crate::translation_flow::{RenderedBlock, typeset};
+type Reply = Result<(String, Vec<RenderedBlock>), String>;
 
 #[derive(Default)]
 pub(crate) struct Translation {
@@ -35,8 +9,9 @@ pub(crate) struct Translation {
     trigger: SelectionTrigger<(usize, usize, usize)>,
     image: Option<pdfcraft_engine::translation::SelectionImage>,
     source: String,
+    source_expanded: bool,
     result: Option<Result<String, String>>,
-    parts: Vec<RenderedPart>,
+    parts: Vec<RenderedBlock>,
     queued: Option<(String, Option<pdfcraft_engine::translation::SelectionImage>)>,
     pending: Option<std::sync::mpsc::Receiver<Reply>>,
 }
@@ -49,6 +24,7 @@ impl Translation {
             return;
         }
         self.source = text;
+        self.source_expanded = false;
         self.image = image.clone();
         self.result = None;
         self.parts.clear();
@@ -122,57 +98,42 @@ impl Translation {
         let window = egui::Window::new(if self.source.is_empty() { "截图翻译" } else { "划词翻译" })
             .id(egui::Id::new(("translation-window", doc)))
             .open(&mut open)
-            .default_width(460.0)
+            .default_width(560.0)
+            .min_width(320.0)
             .default_pos(anchor.map(|p| p + egui::vec2(18.0, 22.0)).unwrap_or(egui::pos2(120.0, 120.0)))
             .resizable(true)
             .collapsible(false)
             .show(ctx, |ui| {
                 ui.weak("DeepSeek Flash · 学术翻译 → 简体中文");
                 ui.separator();
-                egui::ScrollArea::vertical().id_salt("translation-content").max_height(420.0).show(ui, |ui| {
-                    ui.strong("原文");
-                    ui.add(egui::Label::new(if self.source.is_empty() { "已框选的页面截图" } else { &self.source }).wrap().selectable(true));
-                    ui.add_space(12.0);
-                    ui.strong("译文");
-                    match &self.result {
-                        Some(Ok(_)) => {
-                            for (index, part) in self.parts.iter().enumerate() {
-                                match part {
-                                    RenderedPart::Text(text) if !text.trim().is_empty() => {
-                                        ui.add(egui::Label::new(egui::RichText::new(text.trim()).size(17.0)).wrap().selectable(true));
-                                    }
-                                    RenderedPart::Math { latex, texture: Ok(texture) } => {
-                                        egui::ScrollArea::horizontal().id_salt(("formula", index)).show(ui, |ui| {
-                                            ui.add(
-                                                egui::Image::new(texture)
-                                                    .fit_to_exact_size(texture.size_vec2() / 2.0)
-                                                    .tint(ui.visuals().text_color()),
-                                            )
-                                            .on_hover_text(latex);
-                                        });
-                                        ui.add_space(4.0);
-                                    }
-                                    RenderedPart::Math { latex, texture: Err(error) } => {
-                                        ui.colored_label(ui.visuals().error_fg_color, error);
-                                        ui.collapsing("查看公式原文", |ui| {
-                                            ui.label(latex);
-                                        });
-                                    }
-                                    _ => {}
-                                }
+                egui::ScrollArea::vertical()
+                    .id_salt("translation-content")
+                    .max_height((ctx.content_rect().height() * 0.72).clamp(240.0, 680.0))
+                    .show(ui, |ui| {
+                        if !self.source.is_empty() {
+                            let source = egui::CollapsingHeader::new("查看原文").open(Some(self.source_expanded)).show(ui, |ui| {
+                                ui.add(egui::Label::new(&self.source).wrap().selectable(true));
+                            });
+                            if source.header_response.clicked() {
+                                self.source_expanded = !self.source_expanded;
+                            }
+                            ui.add_space(8.0);
+                        }
+                        match &self.result {
+                            Some(Ok(_)) => {
+                                crate::translation_flow::show(ui, &self.parts);
+                            }
+                            Some(Err(error)) => {
+                                ui.colored_label(ui.visuals().error_fg_color, error);
+                            }
+                            None => {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label("正在翻译…");
+                                });
                             }
                         }
-                        Some(Err(error)) => {
-                            ui.colored_label(ui.visuals().error_fg_color, error);
-                        }
-                        None => {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label("正在翻译…");
-                            });
-                        }
-                    }
-                });
+                    });
                 ui.separator();
                 ui.horizontal(|ui| {
                     if let Some(Ok(text)) = &self.result
@@ -239,6 +200,30 @@ impl<K: PartialEq + Clone> SelectionTrigger<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_starts_collapsed_opens_manually_and_resets_for_next_translation() {
+        use egui_kittest::kittest::Queryable;
+        let state =
+            Translation {
+                open: true, source: "Source stays hidden until requested.".into(), result: Some(Ok("译文".into())), ..Default::default()
+            };
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 900.0)).build_ui_state(
+            |ui, state: &mut Translation| {
+                state.show(ui.ctx(), 1, None, None);
+            },
+            state,
+        );
+        h.run_steps(4);
+        assert!(h.query_by_label("Source stays hidden until requested.").is_none());
+        h.get_by_label("查看原文").click();
+        h.run_steps(8);
+        assert!(h.state().source_expanded);
+        h.get_by_label("Source stays hidden until requested.");
+        // Invalid input exercises request initialization without making any network request.
+        h.state_mut().start(&egui::Context::default(), " ".into(), None);
+        assert!(!h.state().source_expanded);
+    }
 
     #[test]
     fn translation_popups_close_on_outside_press_and_stay_closed() {

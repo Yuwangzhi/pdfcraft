@@ -51,3 +51,15 @@ fn screenshot_translation_requires_network_consent_and_a_valid_region() {
     assert!(automation.call("region_translate", &json!({"allow_network":true})).is_err());
     assert!(automation.call("region_translate", &json!({"allow_network":true,"rect":[0,0,20]})).is_err());
 }
+
+#[test]
+fn translation_layout_exposes_paragraph_heading_and_inline_math_semantics() {
+    let mut automation = Automation::new();
+    let output = automation.call("text_render_math", &json!({"text":"### 方法\n\n给定 \\(x_t\\)，预测 \\(y_t\\)。\n\n\\[y_t=x_t+1\\]"})).unwrap();
+    let json: Vec<_> = output.iter().filter_map(|p| if let Content::Json(v) = p { Some(v) } else { None }).collect();
+    assert_eq!(json[0]["kind"], "heading");
+    let inline: Vec<_> = json.iter().filter(|v| v["display"] == false).collect();
+    assert_eq!(inline.len(), 2);
+    assert!(inline.iter().all(|v| v["block"] == 1));
+    assert!(json.iter().any(|v| v["display"] == true && v["block"] == 2));
+}
