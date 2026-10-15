@@ -2423,7 +2423,8 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     // Paging owns the vertical axis in single-page view; leave it to the pager.
     // The rest of a gesture that turned the page is swallowed too, or it would pan the new page
     // away from the edge it was shown at.
-    if single_paging || (!view.continuous && view.wheel.gesture_turned()) {
+    let paging_gesture = single_paging || (!view.continuous && view.wheel.gesture_turned());
+    if paging_gesture {
         precise_scroll.y = 0.0;
     }
     if now < view.precise_scroll_until {
@@ -2436,7 +2437,8 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     // dialog has the input, or animations are off; any click, key, zoom or other scrolling ends it.
     // Asked of the preference, not of egui's animation time, which test harnesses zero.
     let animates = app.animation_effects.animates(app.motion.reduced);
-    let may_glide = !single_paging && !middle_gesture && navigation_enabled && unobstructed && animates;
+    // A gesture consumed by a page turn owns its residual inertia as well as its deltas.
+    let may_glide = !paging_gesture && !middle_gesture && navigation_enabled && unobstructed && animates;
     let over_page = ui.rect_contains_pointer(avail);
     ui.input(|i| view.fling.read(&i.events, now, may_glide && over_page));
     let interrupted = ui.input(|i| i.pointer.any_pressed() || i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. })));
@@ -5073,6 +5075,52 @@ trailer << /Root 1 0 R >>
         );
         v.find = Some(Find { matches: vec![(3, 0..1), (3, 0..1), (1, 0..1)], current: Some(2), ..Default::default() });
         v
+    }
+
+    #[test]
+    fn a_page_turning_swipe_cannot_fling_the_new_page() {
+        use egui::{Event, Modifiers, MouseWheelUnit, TouchPhase};
+        let pdf = pdfcraft_testkit::Pdf::new()
+            .obj("<< /Type /Catalog /Pages 2 0 R >>")
+            .obj("<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 /MediaBox [0 0 300 400] >>")
+            .obj("<< /Type /Page /Parent 2 0 R >>")
+            .obj("<< /Type /Page /Parent 2 0 R >>")
+            .obj("<< /Type /Page /Parent 2 0 R >>")
+            .build();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| {
+            let mut app = crate::PdfCraftApp::new();
+            app.open_bytes("swipe.pdf", None, pdf.clone()).unwrap();
+            for (key, value) in [("language", "en"), ("left", "closed"), ("panel", "none"), ("layout", "single"), ("zoom", "200")] {
+                app.set_option(key, value).unwrap();
+            }
+            // Exercise client-side inertia on every test host, including macOS where
+            // normal operation correctly leaves inertia to the operating system.
+            app.views[0].fling.enabled = true;
+            app
+        });
+        h.run_steps(8);
+        h.hover_at(h.state().views[0].viewport_rect().center());
+        h.run_steps(4);
+        let send = |h: &mut egui_kittest::Harness<'_, crate::PdfCraftApp>, phase, dy| {
+            h.event(Event::MouseWheel { unit: MouseWheelUnit::Point, delta: egui::vec2(0.0, dy), phase, modifiers: Modifiers::NONE });
+            h.step();
+        };
+        send(&mut h, TouchPhase::Start, 0.0);
+        for _ in 0..120 {
+            send(&mut h, TouchPhase::Move, -40.0);
+        }
+        send(&mut h, TouchPhase::End, 0.0);
+        h.run_steps(30);
+        assert_eq!(h.state().views[0].current, 0, "reaching the edge does not turn within the same gesture");
+        send(&mut h, TouchPhase::Start, 0.0);
+        for _ in 0..6 {
+            send(&mut h, TouchPhase::Move, -25.0);
+        }
+        send(&mut h, TouchPhase::End, 0.0);
+        h.run_steps(30);
+        assert_eq!(h.state().views[0].current, 1, "a fresh swipe turns exactly once");
+        let page = h.state().views[0].page_screen_rect(1).unwrap();
+        assert!(page.top() >= h.state().views[0].viewport_rect().top(), "client-side inertia must leave the new page at its top: {page:?}");
     }
 
     #[test]

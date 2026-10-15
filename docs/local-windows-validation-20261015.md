@@ -9,6 +9,11 @@ It does not submit the local translation build to `storytold/pdfcraft`.
   inspecting a frame. There is no renderer in these tests. Dropping unapplied deltas
   triggers egui 0.36's debug assertion, which reproduced in Linux, Windows and FreeBSD
   CI even though the earlier local release-profile tests passed. Layout assertions stay.
+- A second complete CI sweep exposed an upstream inertia bug: a fresh swipe at the page
+  edge turned the page, but the client-side fling then moved the new page away from its top.
+  The pager now owns both the consumed gesture's deltas and residual inertia. A real-frame
+  regression forces client-side inertia on every host, including macOS, and reproduces
+  the same -195-point offset before the fix. Normal continuous scrolling still glides.
 - Translation credentials follow native per-user paths: macOS retains its existing
   Application Support path; Windows uses `%APPDATA%\PdfCraft\private\deepseek.json`
   (with a USERPROFILE fallback); Linux uses XDG_CONFIG_HOME or `~/.config`. Tests inject

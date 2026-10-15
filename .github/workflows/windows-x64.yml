@@ -20,7 +20,8 @@ permissions:
 
 concurrency:
   group: windows-x64-${{ github.ref }}
-  cancel-in-progress: true
+  # Preserve an in-flight native build and its dependency cache when a follow-up fix lands.
+  cancel-in-progress: false
 
 jobs:
   package:
@@ -59,7 +60,7 @@ jobs:
         run: |
           cargo build --release --locked -j 2 -p pdfcraft -p pdfcraft-cli
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --release --locked -j 2 -p pdfcraft-ui-egui --lib --no-run --message-format=json > windows-test-build.jsonl
+          cargo test --release --locked -j 2 -p pdfcraft-ui-egui -p pdfcraft -p pdfcraft-cli --lib --no-run --message-format=json > windows-test-build.jsonl
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Package and hash
         shell: pwsh
