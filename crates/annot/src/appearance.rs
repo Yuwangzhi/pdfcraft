@@ -11,8 +11,8 @@
 //! Helvetica's proportions by character class (no font program or metrics file is bundled).
 
 use pdfcraft_cos::{Dict, Object, PdfString, Stream};
+use pdfcraft_fonts::{first_undrawable, literal, win_ansi};
 pub use pdfcraft_fonts::{helvetica_width as text_width, wrap};
-use pdfcraft_fonts::{literal, win_ansi};
 
 use crate::{NOTE_SIZE, Rgb, n};
 
@@ -104,7 +104,7 @@ fn line_end(c: &mut String, kind: &[u8], tip: (f64, f64), from: (f64, f64), w: f
 /// point parallel to the chord between its neighbours (an end uses itself as the missing
 /// neighbour). Ink is drawn so, as Acrobat draws it, rather than as straight segments. The curve
 /// stays within its points and these control points.
-pub(crate) fn smooth_segments(pts: &[(f64, f64)]) -> Vec<[(f64, f64); 3]> {
+pub fn smooth_segments(pts: &[(f64, f64)]) -> Vec<[(f64, f64); 3]> {
     let Some(&last) = pts.last() else { return Vec::new() };
     let at = |i: usize| pts.get(i).copied().unwrap_or(last);
     (0..pts.len().saturating_sub(1))
@@ -168,6 +168,10 @@ fn color(d: &Dict, key: &[u8]) -> Option<Option<Rgb>> {
         [c, m, y, k] => Some([(1.0 - c) * (1.0 - k), (1.0 - m) * (1.0 - k), (1.0 - y) * (1.0 - k)]),
         _ => return None,
     })
+}
+
+fn interior_color(d: &Dict, fallback: Option<Rgb>) -> Option<Rgb> {
+    color(d, b"IC").flatten().or(fallback)
 }
 
 fn border_width(d: &Dict) -> f64 {
@@ -260,7 +264,38 @@ pub(crate) fn picture_turn(d: &Dict) -> i64 {
     d.get(b"PCPictureRotate").and_then(Object::as_int).unwrap_or(0).rem_euclid(360) / 90 * 90
 }
 
+/// The page `/Rotate` a rubber stamp's label is turned back by (`/PCStampRotate`).
+fn stamp_turn(d: &Dict) -> i64 {
+    d.get(b"PCStampRotate").and_then(Object::as_int).unwrap_or(0).rem_euclid(360) / 90 * 90
+}
+
+/// The page `/Rotate` a text box's or Fill & Sign text's lines are turned back by
+/// (`/PCTextRotate`, written when it is added to a turned page).
+fn text_turn(d: &Dict) -> i64 {
+    d.get(b"PCTextRotate").and_then(Object::as_int).unwrap_or(0).rem_euclid(360) / 90 * 90
+}
+
+/// The first text [`build`] would draw in the standard fonts (Helvetica, WinAnsiEncoding) that
+/// they can't, which would come out as `?`: what it is (for the message) and the character. The
+/// text of a text box, callout or Fill & Sign text, a measurement's label, a dynamic stamp's
+/// "By …" line, and a redaction mark's overlay text (drawn when it is applied). `None` when all of
+/// it can be drawn.
+pub fn undrawable_text(d: &Dict) -> Option<(&'static str, char)> {
+    let text = |key: &[u8]| d.get(key).and_then(Object::as_string).map(PdfString::to_text);
+    let (what, text) = match d.name(b"Subtype")? {
+        b"FreeText" => ("the comment's text", text(b"Contents")?),
+        b"Line" | b"PolyLine" | b"Polygon" => ("the measurement label", text(b"PCMeasureValue")?),
+        b"Stamp" if matches!(d.get(b"PCStamp"), Some(Object::Bool(true))) => ("the stamp's \"By\" line", text(b"PCByLine")?),
+        // Drawn in Helvetica when the redaction is applied: refused when it is marked.
+        b"Redact" => ("the redaction's overlay text", text(b"OverlayText")?),
+        _ => return None,
+    };
+    Some((what, first_undrawable(&text)?))
+}
+
 /// Draw the normal appearance of an annotation, or `None` if this subtype/variant isn't supported.
+/// Text the standard fonts can't draw comes out as `?`: [`undrawable_text`] says which, and
+/// [`crate::set_appearance`] marks the annotation with it (`pdfcraft_fonts::UNDRAWN_MARK`).
 pub fn build(d: &Dict) -> Option<Stream> {
     // Imported measurement appearances may include leaders, captions and formatting that
     // this builder cannot reproduce. Preserve them rather than silently losing detail.
@@ -369,7 +404,7 @@ pub fn build(d: &Dict) -> Option<Stream> {
             }
         }
         b"Square" | b"Circle" => {
-            let fill = color(d, b"IC")?;
+            let fill = interior_color(d, None);
             if stroke.is_none() && fill.is_none() {
                 return Some(form(rect, c.as_bytes(), res));
             }
@@ -403,7 +438,7 @@ pub fn build(d: &Dict) -> Option<Stream> {
             if ends.len() != 2 || ends.iter().any(|e| !known_ending(e)) {
                 return None;
             }
-            let fill = color(d, b"IC")?.unwrap_or(col);
+            let fill = interior_color(d, Some(col)).unwrap_or(col);
             c.push_str(&format!("{}{}{} w 1 J 1 j\n{}", rg_stroke(col), rg(fill), n(w), dash(d)));
             c.push_str(&format!("{} {} m {} {} l S\n[] 0 d\n", n(l[0]), n(l[1]), n(l[2]), n(l[3])));
             for (end, (tip, from)) in ends.iter().zip([((l[0], l[1]), (l[2], l[3])), ((l[2], l[3]), (l[0], l[1]))]) {
@@ -417,7 +452,7 @@ pub fn build(d: &Dict) -> Option<Stream> {
             let pts: Vec<(f64, f64)> = v.as_chunks::<2>().0.iter().map(|p| (p[0], p[1])).collect();
             let col = stroke;
             let closed = subtype == b"Polygon";
-            let fill = if closed { color(d, b"IC")? } else { None };
+            let fill = if closed { interior_color(d, None) } else { None };
             let ends = if subtype == b"PolyLine" {
                 match d.get(b"LE") {
                     None => None,
@@ -461,7 +496,7 @@ pub fn build(d: &Dict) -> Option<Stream> {
                 let (Some(start), Some(end)) = (ends.first(), ends.get(1)) else { return None };
                 let (Some(&tip0), Some(&from0)) = (pts.first(), pts.get(1)) else { return None };
                 let (Some(&tip1), Some(&from1)) = (pts.last(), pts.get(pts.len().saturating_sub(2))) else { return None };
-                let fill = color(d, b"IC")?.unwrap_or(col);
+                let fill = interior_color(d, Some(col)).unwrap_or(col);
                 c.push_str(&format!("[] 0 d\n{}", rg(fill)));
                 if !line_end(&mut c, start, tip0, from0, w) || !line_end(&mut c, end, tip1, from1, w) {
                     return None;
@@ -608,7 +643,26 @@ pub fn build(d: &Dict) -> Option<Stream> {
                     }
                     let kind = crate::StampKind::from_name(other)?;
                     let by = d.get(b"PCByLine").and_then(|o| o.as_string()).map(PdfString::to_text);
-                    return Some(stamp(kind, rect, stroke.unwrap_or(kind.color()), by.as_deref(), opacity, res));
+                    let turn = stamp_turn(d);
+                    let draw = if turn == 0 {
+                        rect
+                    } else {
+                        let (rw, rh) = (rect[2] - rect[0], rect[3] - rect[1]);
+                        let (dw, dh) = if matches!(turn, 90 | 270) { (rh, rw) } else { (rw, rh) };
+                        if dw < 1.0 || dh < 1.0 {
+                            return None;
+                        }
+                        [0.0, 0.0, dw, dh]
+                    };
+                    let mut stream = stamp(kind, draw, stroke.unwrap_or(kind.color()), by.as_deref(), opacity, res);
+                    if turn != 0 {
+                        // Upright in the stamp's displayed box, then mapped into `/Rect` the way
+                        // the page maps display space into user space. Viewers fit that box to
+                        // `/Rect`; the page rotation then shows the label the right way up.
+                        let m = pdfcraft_model::view_matrix_for(turn, rect);
+                        stream.dict.set(b"Matrix".to_vec(), Object::Array(m.iter().copied().map(Object::Real).collect()));
+                    }
+                    return Some(stream);
                 }
             }
         }
@@ -618,6 +672,19 @@ pub fn build(d: &Dict) -> Option<Stream> {
             let bw = if d.contains(b"BS") || d.contains(b"Border") { border_width(d) } else { 0.0 };
             // A callout: the leader line (arrowhead at its first point), and the text box inside
             // `/Rect` by `/RD`.
+            // Text added to a turned page is drawn upright in its displayed box, which the form
+            // `/Matrix` then maps into `/Rect` (as for stamps). Callouts keep user-space axes.
+            let turn = if d.contains(b"CL") { 0 } else { text_turn(d) };
+            let (rect, matrix) = if turn == 0 {
+                (rect, None)
+            } else {
+                let (rw, rh) = (rect[2] - rect[0], rect[3] - rect[1]);
+                let (dw, dh) = if matches!(turn, 90 | 270) { (rh, rw) } else { (rw, rh) };
+                if dw < 1.0 || dh < 1.0 {
+                    return None;
+                }
+                ([0.0, 0.0, dw, dh], Some(pdfcraft_model::view_matrix_for(turn, rect)))
+            };
             let full = rect;
             let mut rect = rect;
             if d.contains(b"CL") {
@@ -703,7 +770,11 @@ pub fn build(d: &Dict) -> Option<Stream> {
             let mut fonts = Dict::new();
             fonts.set(b"Helv".to_vec(), Object::Dict(font));
             res.set(b"Font".to_vec(), Object::Dict(fonts));
-            return Some(form(full, &out, res));
+            let mut stream = form(full, &out, res);
+            if let Some(m) = matrix {
+                stream.dict.set(b"Matrix".to_vec(), Object::Array(m.iter().copied().map(Object::Real).collect()));
+            }
+            return Some(stream);
         }
         _ => return None,
     }

@@ -6,7 +6,7 @@ type Reply = Result<(String, Vec<RenderedBlock>), String>;
 #[derive(Default)]
 pub(crate) struct Translation {
     open: bool,
-    trigger: SelectionTrigger<(usize, usize, usize)>,
+    trigger: SelectionTrigger<crate::canvas::TranslationKey>,
     image: Option<pdfcraft_engine::translation::SelectionImage>,
     source: String,
     source_expanded: bool,
@@ -60,7 +60,7 @@ impl Translation {
         }
     }
 
-    pub(crate) fn update(&mut self, ctx: &egui::Context, selection: Option<(usize, usize, usize)>) -> bool {
+    pub(crate) fn update(&mut self, ctx: &egui::Context, selection: Option<crate::canvas::TranslationKey>) -> bool {
         if let Some(rx) = &self.pending {
             match rx.try_recv() {
                 Ok(result) => {
@@ -199,11 +199,16 @@ impl Translation {
 
 /// Wait for a completed selection; translate each settled selection once. Queue the latest
 /// selection while a request runs instead of launching unbounded concurrent network work.
-#[derive(Default)]
 struct SelectionTrigger<K> {
     observed: Option<K>,
     deadline: f64,
     due: bool,
+}
+
+impl<K> Default for SelectionTrigger<K> {
+    fn default() -> Self {
+        Self { observed: None, deadline: 0.0, due: false }
+    }
 }
 
 impl<K: PartialEq + Clone> SelectionTrigger<K> {
@@ -227,6 +232,36 @@ impl<K: PartialEq + Clone> SelectionTrigger<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translation_temporarily_hides_docked_inspector_and_restores_layout() {
+        use egui_kittest::kittest::Queryable;
+        let pdf = pdfcraft_testkit::Pdf::new()
+            .obj("<< /Type /Catalog /Pages 2 0 R >>")
+            .obj("<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+            .obj("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] >>")
+            .build();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| {
+            let mut app = crate::PdfCraftApp::new();
+            app.set_option("language", "en").unwrap();
+            app.open_bytes("synthetic.pdf", None, pdf.clone()).unwrap();
+            app.choose_right_panel(Some(crate::RightPanel::Bookmarks));
+            app
+        });
+        h.run_steps(5);
+        h.get_by_label("This document has no bookmarks.");
+        let layout = serde_json::to_value(&h.state().docking).unwrap();
+        h.state_mut().views[0].translation =
+            Translation { open: true, source: "Synthetic selection".into(), result: Some(Ok("测试译文".into())), ..Default::default() };
+        h.run_steps(5);
+        assert!(h.query_by_label("This document has no bookmarks.").is_none());
+        assert_eq!(h.state().right, Some(crate::RightPanel::Bookmarks));
+        assert_eq!(serde_json::to_value(&h.state().docking).unwrap(), layout);
+        h.state_mut().views[0].translation.open = false;
+        h.run_steps(5);
+        h.get_by_label("This document has no bookmarks.");
+        assert_eq!(serde_json::to_value(&h.state().docking).unwrap(), layout);
+    }
 
     #[test]
     fn original_starts_collapsed_opens_manually_and_resets_for_next_translation() {

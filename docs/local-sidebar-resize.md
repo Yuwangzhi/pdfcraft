@@ -1,5 +1,8 @@
 # Local bookmark sidebar resize repair — 2026-10-11
 
+> Historical implementation and validation record. The 2026-10-15 integration
+> supersedes parts of this implementation; see [current integration notes](local-upstream-sync-20261015.md).
+
 Installed version: `0.5.0-local-font1-deepseek6-sidebar1` (`0.5.0.9`).
 
 The bookmark search row reserved 32 points for a 26-point clear button plus

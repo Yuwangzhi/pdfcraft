@@ -1,5 +1,8 @@
 # Local macOS font repair
 
+> Historical implementation and validation record. The 2026-10-15 integration
+> supersedes parts of this implementation; see [current integration notes](local-upstream-sync-20261015.md).
+
 Base: PdfCraft v0.5.0, ef9b553f5505bcd4954ba01d6a896ea2a37efe06.
 
 This is a local modified build, not an official upstream release.

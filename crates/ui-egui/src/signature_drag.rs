@@ -66,7 +66,7 @@ impl SignatureDrag {
         let scale = scale.min(crate::canvas::BASE_SIDE / p.width.max(p.height).max(1.0));
         let tag = (scale * 1000.0) as u64;
         if layers.tag != Some(tag) {
-            layers.renderer.set_queue(vec![RenderRequest { page, scale, tag, ..Default::default() }]);
+            layers.renderer.set_queue(vec![RenderRequest { page, scale, tag, preview: true, ..Default::default() }]);
             layers.tag = Some(tag);
         }
         if let Some(out) = layers.renderer.try_recv()
@@ -124,7 +124,7 @@ impl SignatureDrag {
 
     pub fn paint(&self, painter: &egui::Painter, cx: &PageCx<'_>, cv: &CommentView, pending: Option<&Edit>) {
         let (Some((_, page, index)), Some(layers)) = (self.key, &self.layers) else { return };
-        if page != cx.page || cx.tool != QuickTool::Select || cx.hidden {
+        if page != cx.page || !matches!(cx.tool, QuickTool::Select | QuickTool::Fill(_)) || cx.hidden {
             return;
         }
         let dragging = matches!(cv.gesture, Some(Gesture::Move { page: p, index: i, .. } | Gesture::Resize { page: p, index: i, .. }) if (p, i) == (page, index));
@@ -133,7 +133,8 @@ impl SignatureDrag {
             return;
         }
         let (Some(background), Some(a), Some(p)) = (&layers.background, cx.get(index), cx.info.pages.get(page)) else { return };
-        let rect = cx.adjusted_rect(a, cv.gesture.as_ref(), painter.ctx().input(|i| i.pointer.hover_pos()), pending);
+        let (pointer, shift) = painter.ctx().input(|i| (i.pointer.hover_pos(), i.modifiers.shift));
+        let rect = cx.adjusted_rect(a, cv.gesture.as_ref(), pointer, shift, pending);
         let rect = cx.rect_to_user(rect);
         let painter = painter.with_clip_rect(painter.clip_rect().intersect(cx.xf.rect));
         cx.xf.paint_image(&painter, background.id(), 0.0, 0.0, 1.0, 1.0);

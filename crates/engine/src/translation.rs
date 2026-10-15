@@ -316,7 +316,7 @@ mod tests {
         assert_eq!(body["messages"][1]["content"][1]["image_url"]["url"], "data:image/png;base64,AQID");
         assert_eq!(body["thinking"]["type"], "disabled");
         assert_eq!(config_quote("a\"b\\c\nd"), "\"a\\\"b\\\\c\\nd\"");
-        let source = crate::export::ExportSource { bytes: std::sync::Arc::new(vec![]), config: Default::default(), pages: 1 };
+        let source = crate::export::ExportSource { bytes: std::sync::Arc::new(vec![]), config: Default::default(), pages: 1, sizes: vec![] };
         for rect in [[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, f32::NAN, 1.0], [-1.0, 0.0, 10.0, 10.0]] {
             assert!(SelectionImage { source: source.clone(), page: 0, rect }.png().is_err());
         }

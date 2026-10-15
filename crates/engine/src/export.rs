@@ -12,6 +12,8 @@ use crate::Document;
 pub struct Exporter {
     renderer: PageRenderer,
     pages: usize,
+    /// Each page's displayed size in points, for [`Exporter::dpi_used`].
+    sizes: Vec<(f32, f32)>,
 }
 
 /// What an export needs from a document, as plain values that can move to a worker thread.
@@ -20,12 +22,19 @@ pub struct ExportSource {
     pub bytes: std::sync::Arc<Vec<u8>>,
     pub config: pdfcraft_render::RenderConfig,
     pub pages: usize,
+    /// Each page's displayed size in points (after `/Rotate` and `/UserUnit`).
+    pub sizes: Vec<(f32, f32)>,
 }
 
 impl Document {
     /// The current state, for exporting on another thread.
     pub fn export_source(&self) -> ExportSource {
-        ExportSource { bytes: self.display.clone(), config: self.config.clone(), pages: self.info.pages.len() }
+        ExportSource {
+            bytes: self.display.clone(),
+            config: self.config.clone(),
+            pages: self.info.pages.len(),
+            sizes: self.info.pages.iter().map(|p| (p.width, p.height)).collect(),
+        }
     }
 }
 
@@ -37,8 +46,11 @@ pub fn extract_images(src: &ExportSource, pages: &[usize], min_side: u32) -> Res
 }
 
 /// The file name for the `index`-th (1-based) exported image: `<stem>_Page_<n>_Image_<index>.<ext>`.
-pub fn image_file_name(stem: &str, image: &pdfcraft_create::ExtractedImage, index: usize) -> String {
-    format!("{stem}_Page_{}_Image_{index:04}.{}", image.page + 1, image.extension)
+/// The page number has leading zeros for as many digits as the document's `page_count` has, so the
+/// files sort in page order (#2208): page 7 of 120 is `Page_007`.
+pub fn image_file_name(stem: &str, image: &pdfcraft_create::ExtractedImage, index: usize, page_count: usize) -> String {
+    let width = page_count.max(1).to_string().len();
+    format!("{stem}_Page_{:0width$}_Image_{index:04}.{}", image.page + 1, image.extension)
 }
 
 impl Exporter {
@@ -46,15 +58,29 @@ impl Exporter {
         Self::from_source(doc.export_source())
     }
 
+    /// An exporter that draws a page too large for the renderer's size limits at the largest
+    /// resolution they allow, as the interactive Export does; [`Exporter::dpi_used`] says at what.
+    /// A source whose `config.reject_oversize` is set refuses such pages instead.
     pub fn from_source(src: ExportSource) -> Self {
-        Self { renderer: PageRenderer::new(src.bytes, src.config), pages: src.pages }
+        Self { renderer: PageRenderer::new(src.bytes, src.config), pages: src.pages, sizes: src.sizes }
+    }
+
+    /// The resolution page `page` is actually exported at when asked for `dpi`: lower than asked
+    /// when the page is too large for the renderer's size limits at that resolution.
+    pub fn dpi_used(&self, page: usize, dpi: f64) -> f64 {
+        let dpi = dpi.clamp(18.0, 1200.0);
+        match self.sizes.get(page) {
+            Some(&(w, h)) => f64::from(pdfcraft_render::effective_scale(w, h, (dpi / 72.0) as f32)) * 72.0,
+            None => dpi,
+        }
     }
 
     fn check(&self, page: usize) -> Result<(), String> {
         if page < self.pages { Ok(()) } else { Err(format!("page {} does not exist", page + 1)) }
     }
 
-    /// Page `page` (0-based) as a PNG at `dpi` (capped by the renderer's size limits).
+    /// Page `page` (0-based) as a PNG at `dpi`, at most the renderer's size limits allow (see
+    /// [`Exporter::dpi_used`]); refused instead when the source asked for `reject_oversize`.
     pub fn png(&mut self, page: usize, dpi: f64) -> Result<Vec<u8>, String> {
         self.check(page)?;
         let r = self.renderer.render(RenderRequest { page, scale: (dpi.clamp(18.0, 1200.0) / 72.0) as f32, ..Default::default() });
@@ -188,4 +214,30 @@ pub fn encode_tiff(width: u32, height: u32, premultiplied: &[u8]) -> Result<Vec<
     let mut out = std::io::Cursor::new(Vec::new());
     image::codecs::tiff::TiffEncoder::new(&mut out).write_image(&rgb, width, height, image::ExtendedColorType::Rgb8).map_err(|e| e.to_string())?;
     Ok(out.into_inner())
+}
+
+#[cfg(test)]
+mod image_name_tests {
+    use super::image_file_name;
+
+    fn image(page: usize) -> pdfcraft_create::ExtractedImage {
+        pdfcraft_create::ExtractedImage {
+            page,
+            object: pdfcraft_cos::ObjRef { num: 1, generation: 0 },
+            width: 1,
+            height: 1,
+            extension: "png",
+            data: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn page_number_is_padded_to_the_page_count() {
+        assert_eq!(image_file_name("doc", &image(0), 1, 1), "doc_Page_1_Image_0001.png");
+        assert_eq!(image_file_name("doc", &image(0), 1, 9), "doc_Page_1_Image_0001.png");
+        assert_eq!(image_file_name("doc", &image(6), 2, 20), "doc_Page_07_Image_0002.png");
+        assert_eq!(image_file_name("doc", &image(6), 3, 120), "doc_Page_007_Image_0003.png");
+        assert_eq!(image_file_name("doc", &image(119), 4, 120), "doc_Page_120_Image_0004.png");
+        assert_eq!(image_file_name("doc", &image(0), 1, 0), "doc_Page_1_Image_0001.png");
+    }
 }

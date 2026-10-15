@@ -7,6 +7,9 @@ use pdfcraft_cos::{Dict, Document, ObjRef, Object};
 /// Attributes a page inherits from its ancestors (ISO 32000-2 §7.7.3.4).
 pub const INHERITABLE: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
 
+/// The largest `/UserUnit` honoured, as in Acrobat (a larger value counts as this one).
+pub const MAX_USER_UNIT: f64 = 75_000.0;
+
 /// A leaf page and its effective (inherited) attributes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Page {
@@ -34,22 +37,33 @@ impl Page {
         }
     }
 
-    /// Clockwise rotation when displayed: 0, 90, 180 or 270.
+    /// Clockwise rotation when displayed: 0, 90, 180 or 270. A `/Rotate` that isn't a multiple
+    /// of 90 (ISO 32000-2 §7.7.3.3 requires one) counts as 0, as the renderer draws that page.
     pub fn rotation(&self, doc: &Document) -> i64 {
-        self.dict.get(b"Rotate").and_then(|o| doc.resolve(o).as_int()).unwrap_or(0).rem_euclid(360) / 90 * 90
+        let r = self.dict.get(b"Rotate").and_then(|o| doc.resolve(o).as_int()).unwrap_or(0).rem_euclid(360);
+        if r % 90 == 0 { r } else { 0 }
     }
 
-    /// The displayed size (width, height) in points.
+    /// The size of the page's user-space unit in points (`/UserUnit`; it isn't inherited), read
+    /// as Acrobat reads it: a number from 1 up, at most [`MAX_USER_UNIT`]; anything else is 1.
+    pub fn user_unit(&self, doc: &Document) -> f64 {
+        self.dict.get(b"UserUnit").and_then(|o| doc.resolve(o).as_f64()).filter(|u| *u >= 1.0).map_or(1.0, |u| u.min(MAX_USER_UNIT))
+    }
+
+    /// The displayed size (width, height) in points, after `/UserUnit` and `/Rotate`.
     pub fn display_size(&self, doc: &Document) -> (f64, f64) {
         let c = self.crop(doc);
-        let (w, h) = (c[2] - c[0], c[3] - c[1]);
+        let u = self.user_unit(doc);
+        let (w, h) = ((c[2] - c[0]) * u, (c[3] - c[1]) * u);
         if self.rotation(doc) % 180 == 0 { (w, h) } else { (h, w) }
     }
 
-    /// The matrix `[a b c d e f]` from display space (origin at the bottom-left of the page as
-    /// shown, y up, after `/Rotate`) to user space.
+    /// The matrix `[a b c d e f]` from display space (points, origin at the bottom-left of the
+    /// page as shown, y up, after `/UserUnit` and `/Rotate`) to user space.
     pub fn view_matrix(&self, doc: &Document) -> [f64; 6] {
-        view_matrix_for(self.rotation(doc), self.crop(doc))
+        let m = view_matrix_for(self.rotation(doc), self.crop(doc));
+        let u = self.user_unit(doc);
+        if u == 1.0 { m } else { [m[0] / u, m[1] / u, m[2] / u, m[3] / u, m[4], m[5]] }
     }
 }
 
@@ -70,44 +84,97 @@ pub fn view_matrix_for(rotation: i64, crop: [f64; 4]) -> [f64; 6] {
 /// Leaf pages in document order, with inherited attributes resolved. Cycles and absurdly deep
 /// trees are cut off rather than followed.
 pub fn pages(doc: &Document) -> Vec<Page> {
-    let Some(root) = doc.root() else { return Vec::new() };
-    let Some(top) = doc.get(root).as_dict().and_then(|d| d.reference(b"Pages")) else { return Vec::new() };
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut stack: Vec<(ObjRef, Dict)> = vec![(top, Dict::new())];
-    while let Some((node, inherited)) = stack.pop() {
-        if !seen.insert(node) || seen.len() > 1_000_000 {
-            continue;
-        }
-        let obj = doc.get(node);
-        let Some(d) = obj.as_dict() else { continue };
-        let mut attrs = inherited.clone();
-        for k in INHERITABLE {
-            if let Some(v) = d.get(k) {
-                attrs.set(k.to_vec(), v.clone());
-            }
-        }
-        let is_pages = d.name(b"Type") == Some(b"Pages") || (d.contains(b"Kids") && d.name(b"Type") != Some(b"Page"));
-        if is_pages {
-            let kids = d.get(b"Kids").map(|k| doc.resolve(k)).and_then(|k| k.as_array().cloned()).unwrap_or_default();
-            for k in kids.iter().rev() {
-                if let Some(r) = k.as_ref() {
-                    stack.push((r, attrs.clone()));
-                }
-            }
-        } else {
-            let mut dict = d.clone();
-            for k in INHERITABLE {
-                if !dict.contains(k)
-                    && let Some(v) = attrs.get(k)
-                {
-                    dict.set(k.to_vec(), v.clone());
-                }
-            }
-            out.push(Page { obj: node, dict });
+    PageTree::new(doc).collect()
+}
+
+// Retain the owner of each inherited value rather than deep-cloning direct Resources on
+// every edge. Only the final Page dictionaries need owned copies of those values.
+type Inherited = [Option<std::sync::Arc<Object>>; 4];
+
+struct Children {
+    owner: std::sync::Arc<Object>,
+    next: usize,
+    inherited: Inherited,
+}
+
+impl Children {
+    fn kids(&self) -> Option<&Vec<Object>> {
+        match &*self.owner {
+            Object::Dict(d) => d.get(b"Kids")?.as_array(),
+            other => other.as_array(),
         }
     }
-    out
+}
+
+struct PageTree<'a> {
+    doc: &'a Document,
+    seen: std::collections::HashSet<ObjRef>,
+    // One cursor per ancestor, never one entry per child. This also preserves the first
+    // depth-first occurrence's attributes when malformed trees share a child.
+    pending: Vec<Children>,
+}
+
+impl<'a> PageTree<'a> {
+    fn new(doc: &'a Document) -> Self {
+        let top = doc.root().and_then(|r| doc.get(r).as_dict().and_then(|d| d.reference(b"Pages")));
+        let pending = top
+            .into_iter()
+            .map(|r| Children { owner: std::sync::Arc::new(Object::Array(vec![Object::Ref(r)])), next: 0, inherited: Default::default() })
+            .collect();
+        Self { doc, seen: Default::default(), pending }
+    }
+}
+
+impl Iterator for PageTree<'_> {
+    type Item = Page;
+
+    fn next(&mut self) -> Option<Page> {
+        while let Some(parent) = self.pending.last_mut() {
+            let Some(child) = parent.kids().and_then(|kids| kids.get(parent.next)) else {
+                self.pending.pop();
+                continue;
+            };
+            let node = child.as_ref();
+            // A successful get means next is strictly below the allocated array length.
+            parent.next += 1;
+            let Some(node) = node else { continue };
+            if self.seen.len() >= 1_000_000 {
+                self.pending.clear();
+                return None;
+            }
+            if !self.seen.insert(node) {
+                continue;
+            }
+            let obj = self.doc.get(node);
+            let Some(d) = obj.as_dict() else { continue };
+            let mut inherited = parent.inherited.clone();
+            for (key, owner) in INHERITABLE.iter().zip(&mut inherited) {
+                if d.contains(key) {
+                    *owner = Some(obj.clone());
+                }
+            }
+            let is_pages = d.name(b"Type") == Some(b"Pages") || (d.contains(b"Kids") && d.name(b"Type") != Some(b"Page"));
+            if is_pages {
+                let owner = match d.get(b"Kids") {
+                    Some(Object::Ref(r)) => self.doc.get(*r),
+                    Some(Object::Array(_)) => obj.clone(),
+                    _ => continue,
+                };
+                self.pending.push(Children { owner, next: 0, inherited });
+            } else {
+                let mut dict = d.clone();
+                for (key, owner) in INHERITABLE.iter().zip(&inherited) {
+                    if !dict.contains(key)
+                        && let Some(value) = owner.as_ref().and_then(|o| o.as_dict()).and_then(|d| d.get(key))
+                    {
+                        dict.set(key.to_vec(), value.clone());
+                    }
+                }
+                return Some(Page { obj: node, dict });
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -117,10 +184,15 @@ mod tests {
     use super::*;
 
     fn doc(rotate: i64) -> Document {
+        doc_with(rotate, "", "")
+    }
+
+    /// `pages` and `page` add entries to the page tree node and to the page.
+    fn doc_with(rotate: i64, pages: &str, page: &str) -> Document {
         let objs = [
             "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
-            format!("<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 600 800] /Rotate {rotate} /Resources << /Font << >> >> >>"),
-            "<< /Type /Page /Parent 2 0 R /CropBox [10 20 210 320] >>".to_string(),
+            format!("<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 600 800] /Rotate {rotate} /Resources << /Font << >> >> {pages} >>"),
+            format!("<< /Type /Page /Parent 2 0 R /CropBox [10 20 210 320] {page} >>"),
         ];
         let mut out = b"%PDF-1.7\n".to_vec();
         let mut offs = Vec::new();
@@ -135,6 +207,68 @@ mod tests {
         }
         out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes());
         Document::open(Arc::new(out)).unwrap()
+    }
+
+    #[test]
+    fn repeated_children_do_not_queue_resource_copies() {
+        let mut d = doc(0);
+        let root = ObjRef { num: 2, generation: 0 };
+        let leaf = ObjRef { num: 3, generation: 0 };
+        d.update_dict(root, |dict| {
+            // Modest fixture: the assertion measures retained work, not an OOM or timing.
+            dict.set(b"Kids".to_vec(), Object::Array(vec![Object::Ref(leaf); 128]));
+            let mut resources = Dict::new();
+            resources.set(b"Payload".to_vec(), Object::Array(vec![Object::Int(42); 1024]));
+            dict.set(b"Resources".to_vec(), Object::Dict(resources));
+        })
+        .unwrap();
+        let mut walk = PageTree::new(&d);
+        let p = walk.next().unwrap();
+        assert_eq!(p.obj, leaf);
+        assert_eq!(p.dict.get(b"Resources").unwrap().as_dict().unwrap().get(b"Payload").unwrap().as_array().unwrap().len(), 1024);
+        assert!(walk.pending.len() <= 2, "duplicate edges retained {} pending entries", walk.pending.len());
+        assert!(walk.next().is_none());
+    }
+
+    #[test]
+    fn shared_children_keep_depth_first_order_and_nearest_attributes() {
+        let mut d = doc(0);
+        let root = ObjRef { num: 2, generation: 0 };
+        let leaf = ObjRef { num: 3, generation: 0 };
+        let mut second = d.get(leaf).as_dict().unwrap().clone();
+        second.set(b"Rotate".to_vec(), Object::Int(180));
+        let second = d.add(second);
+        let mut branch = Dict::new();
+        branch.set(b"Type".to_vec(), Object::name("Pages"));
+        branch.set(b"Rotate".to_vec(), Object::Int(90));
+        // A cycle, a shared child, an invalid entry, and an indirect Kids array.
+        let kids = d.add(Object::Array(vec![Object::Ref(root), Object::Null, Object::Ref(leaf), Object::Ref(second)]));
+        branch.set(b"Kids".to_vec(), Object::Ref(kids));
+        let branch = d.add(branch);
+        d.update_dict(root, |dict| {
+            dict.set(b"Kids".to_vec(), Object::Array(vec![Object::Ref(branch), Object::Ref(leaf), Object::Ref(second)]));
+        })
+        .unwrap();
+        let pages = pages(&d);
+        assert_eq!(pages.iter().map(|p| p.obj).collect::<Vec<_>>(), vec![leaf, second]);
+        assert_eq!(pages[0].rotation(&d), 90, "first depth-first occurrence supplies inheritance");
+        assert_eq!(pages[1].rotation(&d), 180, "a leaf's own attribute wins");
+        assert!(pages.iter().all(|p| p.dict.contains(b"Resources")));
+    }
+
+    #[test]
+    fn wide_page_tree_retains_only_ancestor_cursors() {
+        let mut d = doc(0);
+        let root = ObjRef { num: 2, generation: 0 };
+        let leaf = d.get(ObjRef { num: 3, generation: 0 }).as_dict().unwrap().clone();
+        let kids: Vec<Object> = (0..64).map(|_| Object::Ref(d.add(leaf.clone()))).collect();
+        d.update_dict(root, |dict| dict.set(b"Kids".to_vec(), Object::Array(kids.clone()))).unwrap();
+        let mut walk = PageTree::new(&d);
+        for kid in kids {
+            assert_eq!(walk.next().unwrap().obj, kid.as_ref().unwrap());
+            assert!(walk.pending.len() <= 2);
+        }
+        assert!(walk.next().is_none());
     }
 
     fn apply(m: [f64; 6], x: f64, y: f64) -> [f64; 2] {
@@ -164,6 +298,50 @@ mod tests {
                 _ => [210.0, 320.0],
             };
             assert_eq!(tl, expect, "rotation {rotate}");
+        }
+    }
+
+    /// A `/Rotate` that isn't a quarter turn counts as 0, as the renderer draws the page
+    /// upright, so display space matches what's on screen.
+    #[test]
+    fn rotate_off_a_quarter_turn_counts_as_upright() {
+        for rotate in [135, 30, -45, 359] {
+            let d = doc(rotate);
+            let p = &pages(&d)[0];
+            assert_eq!(p.rotation(&d), 0, "{rotate}");
+            assert_eq!(p.display_size(&d), (200.0, 300.0), "{rotate}");
+            assert_eq!(p.view_matrix(&d), [1.0, 0.0, 0.0, 1.0, 10.0, 20.0], "{rotate}");
+        }
+        let d = doc(-90);
+        assert_eq!(pages(&d)[0].rotation(&d), 270);
+    }
+
+    /// Display space is in points: `/UserUnit 2` doubles it. As in Acrobat, the value isn't
+    /// inherited, values below 1 or not numbers count as 1, and values over 75,000 as 75,000.
+    #[test]
+    fn user_unit_scales_display_space() {
+        for rotate in [0, 90, 180, 270] {
+            let d = doc_with(rotate, "", "/UserUnit 2");
+            let p = &pages(&d)[0];
+            let (w, h) = p.display_size(&d);
+            assert_eq!((w, h), if rotate % 180 == 0 { (400.0, 600.0) } else { (600.0, 400.0) }, "{rotate}");
+            let plain = doc(rotate);
+            let unscaled = pages(&plain)[0].view_matrix(&plain);
+            for (x, y) in [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h), (37.0, 81.0)] {
+                assert_eq!(apply(p.view_matrix(&d), x, y), apply(unscaled, x / 2.0, y / 2.0), "{rotate}: ({x}, {y})");
+            }
+        }
+        for (pages_attrs, page_attrs, unit) in [
+            ("/UserUnit 2", "", 1.0),
+            ("", "/UserUnit 1.5", 1.5),
+            ("", "/UserUnit 0.5", 1.0),
+            ("", "/UserUnit 0", 1.0),
+            ("", "/UserUnit -2", 1.0),
+            ("", "/UserUnit /Two", 1.0),
+            ("", "/UserUnit 100000", MAX_USER_UNIT),
+        ] {
+            let d = doc_with(0, pages_attrs, page_attrs);
+            assert_eq!(pages(&d)[0].user_unit(&d), unit, "{pages_attrs} {page_attrs}");
         }
     }
 }
