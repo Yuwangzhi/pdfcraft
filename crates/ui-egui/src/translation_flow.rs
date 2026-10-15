@@ -137,7 +137,7 @@ mod tests {
         for width in [700.0, 220.0] {
             let mut height = 0.0;
             for _ in 0..2 {
-                let _ = ctx.run_ui(
+                let mut output = ctx.run_ui(
                     egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 800.0))), ..Default::default() },
                     |ui| {
                         egui::CentralPanel::default().show(ui, |ui| {
@@ -147,6 +147,8 @@ mod tests {
                         });
                     },
                 );
+                // No renderer is attached to this context-only test.
+                output.textures_delta.clear();
             }
             heights.push(height);
         }

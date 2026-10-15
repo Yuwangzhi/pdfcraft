@@ -99,10 +99,23 @@ fn config_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t"))
 }
 
+/// Resolve the native per-user secret location without copying it into normal app settings.
+#[cfg(not(target_arch = "wasm32"))]
+fn private_config_path(platform: &str, mut env: impl FnMut(&str) -> Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let root = match platform {
+        "windows" => {
+            env("APPDATA").map(PathBuf::from).or_else(|| env("USERPROFILE").map(|home| PathBuf::from(home).join("AppData/Roaming")))?.join("PdfCraft")
+        }
+        "macos" => PathBuf::from(env("HOME")?).join("Library/Application Support/PdfCraft"),
+        _ => env("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| env("HOME").map(|home| PathBuf::from(home).join(".config")))?.join("PdfCraft"),
+    };
+    Some(root.join("private/deepseek.json"))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn api_key() -> Result<String, String> {
-    let home = std::env::var_os("HOME").ok_or_else(|| "无法找到翻译配置目录。".to_string())?;
-    let path = std::path::PathBuf::from(home).join("Library/Application Support/PdfCraft/private/deepseek.json");
+    let path = private_config_path(std::env::consts::OS, |name| std::env::var_os(name)).ok_or_else(|| "无法找到翻译配置目录。".to_string())?;
     let data = std::fs::read(path).map_err(|_| "未配置 DeepSeek API 密钥。".to_string())?;
     let value: serde_json::Value = serde_json::from_slice(&data).map_err(|_| "DeepSeek 配置格式无效。".to_string())?;
     let key = value["api_key"]
@@ -239,6 +252,29 @@ fn parse_response(bytes: &[u8]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn private_config_paths_follow_the_native_platform() {
+        use std::{ffi::OsString, path::PathBuf};
+        let home = PathBuf::from("test-home");
+        let roaming = PathBuf::from("test-roaming");
+        let xdg = PathBuf::from("test-xdg");
+        let lookup = |key: &str| match key {
+            "HOME" | "USERPROFILE" => Some(OsString::from(&home)),
+            "APPDATA" => Some(OsString::from(&roaming)),
+            "XDG_CONFIG_HOME" => Some(OsString::from(&xdg)),
+            _ => None,
+        };
+        assert_eq!(private_config_path("windows", lookup), Some(roaming.join("PdfCraft/private/deepseek.json")));
+        assert_eq!(private_config_path("macos", lookup), Some(home.join("Library/Application Support/PdfCraft/private/deepseek.json")));
+        assert_eq!(private_config_path("linux", lookup), Some(xdg.join("PdfCraft/private/deepseek.json")));
+        let home_only = |key: &str| matches!(key, "HOME" | "USERPROFILE").then(|| home.clone().into_os_string());
+        assert_eq!(private_config_path("windows", home_only), Some(home.join("AppData/Roaming/PdfCraft/private/deepseek.json")));
+        assert_eq!(private_config_path("linux", home_only), Some(home.join(".config/PdfCraft/private/deepseek.json")));
+        assert_eq!(private_config_path("windows", |_| None), None);
+        assert_eq!(private_config_path("macos", |_| None), None);
+    }
 
     #[test]
     fn screenshot_request_translates_the_entire_crop_without_extracted_text() {

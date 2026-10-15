@@ -17,13 +17,15 @@
 
 ## 本机配置（macOS）
 
-创建 `~/Library/Application Support/PdfCraft/private/deepseek.json`，内容如下，将示例占位符替换为自己的密钥：
+macOS 创建 `~/Library/Application Support/PdfCraft/private/deepseek.json`，内容如下，将示例占位符替换为自己的密钥：
 
 ```json
 {"api_key": "YOUR_DEEPSEEK_API_KEY"}
 ```
 
-`private` 目录权限应为 `0700`，配置文件权限为 `0600`。密钥不放入仓库、应用二进制或普通设置文件，不在进程参数、错误提示或日志中显示。当前安装已配置；仓库不包含任何真实密钥。
+Windows 使用 `%APPDATA%\PdfCraft\private\deepseek.json`；Linux 使用 `${XDG_CONFIG_HOME:-~/.config}/PdfCraft/private/deepseek.json`。Windows 私有目录应关闭继承，仅允许当前用户和 SYSTEM 访问。
+
+macOS/Linux 的 `private` 目录权限应为 `0700`，配置文件权限为 `0600`。密钥不放入仓库、应用二进制或普通设置文件，不在进程参数、错误提示或日志中显示。当前安装已配置；仓库不包含任何真实密钥。
 
 翻译请求、截图生成和公式排版均在后台执行。请求串行处理，选择变化时保留最后一个待翻译选区；连接超时 8 秒，总超时 45 秒，不自动切换到其他翻译服务。没有磁盘翻译历史，不修改 PDF。
 

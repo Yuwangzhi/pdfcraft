@@ -294,7 +294,7 @@ mod tests {
             let ctx = egui::Context::default();
             let mut translation = Translation { open: true, source: source.into(), result: Some(Ok("译文".into())), ..Default::default() };
             for _ in 0..3 {
-                let _ = ctx.run_ui(
+                let mut output = ctx.run_ui(
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 900.0))),
                         ..Default::default()
@@ -307,9 +307,11 @@ mod tests {
                         assert!(remaining.left() < 10.0, "sidebar docks to the right");
                     },
                 );
+                // No renderer is attached to this context-only test.
+                output.textures_delta.clear();
             }
             assert!(translation.open);
-            let _ = ctx.run_ui(
+            let mut output = ctx.run_ui(
                 egui::RawInput {
                     events: vec![egui::Event::PointerButton {
                         pos: egui::pos2(100.0, 800.0),
@@ -324,8 +326,10 @@ mod tests {
                     translation.show(ui, 1);
                 },
             );
+            // No renderer is attached to this context-only test.
+            output.textures_delta.clear();
             assert!(translation.open, "a press must not shift the page during selection");
-            let _ = ctx.run_ui(
+            let mut output = ctx.run_ui(
                 egui::RawInput {
                     events: vec![egui::Event::PointerButton {
                         pos: egui::pos2(100.0, 800.0),
@@ -339,13 +343,17 @@ mod tests {
                     translation.show(ui, 1);
                 },
             );
+            // No renderer is attached to this context-only test.
+            output.textures_delta.clear();
             assert!(translation.open, "outside clicks keep the docked translation visible: {source}");
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
                 translation.update(ui.ctx(), None);
                 translation.show(ui, 1);
             });
+            // No renderer is attached to this context-only test.
+            output.textures_delta.clear();
             assert!(translation.open);
-            let _ = ctx.run_ui(
+            let mut output = ctx.run_ui(
                 egui::RawInput {
                     events: vec![egui::Event::Key {
                         key: egui::Key::Escape,
@@ -361,6 +369,8 @@ mod tests {
                     translation.show(ui, 1);
                 },
             );
+            // No renderer is attached to this context-only test.
+            output.textures_delta.clear();
             assert!(!translation.open);
         }
     }

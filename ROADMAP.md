@@ -156,6 +156,7 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
 | 8 | 1.0 polish: performance, right-to-left, missing languages, keyboard-only (M14) | 55–95 |
 
 ## Progress log
+- **2026-10-15 (local fork, Windows validation):** Fix context-only egui texture cleanup under debug assertions; add Windows x64 portable/test artifacts and native per-user translation configuration paths. Track the isolated bundled-font maintenance exception in the Windows delivery notes; parity estimates unchanged.
 - **2026-10-15 (local fork, M3/M14):** Integrate upstream `00442a0e` with selection/screenshot translation, saved sidebar defaults and explicit reopen refresh. Adapt docking and Run/Column selections, retain native tab-drag fixes alongside upstream file watching, and fill catalog gaps found by scoped regression tests. See [integration notes](docs/local-upstream-sync-20261015.md); upstream parity estimates unchanged.
 - **2026-10-13 (G14, Vietnamese localization):** Added Vietnamese (`vi`, Tiếng Việt) as an interface and date language with a 2,591-entry catalog (`plural_none`) covering 100% of the current localizable key union (plus `theme`/`Appearance`). Locale tags `vi` / `vi-VN` / `vi_VN.UTF-8` resolve; calendar months use numeric `Tháng 1`…`12` / `tháng 1`…`12`. Native-speaker community review recorded. The twelve-language localization mean moves from ≈59% to ≈68%; weighted readiness ≈49% → ≈50%. Status stays `partial`: engine/OS details, document contents, filenames, CLI/MCP and external help stay outside the catalog by design.
 
