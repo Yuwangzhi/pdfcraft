@@ -14,6 +14,9 @@ It does not submit the local translation build to `storytold/pdfcraft`.
   The pager now owns both the consumed gesture's deltas and residual inertia. A real-frame
   regression forces client-side inertia on every host, including macOS, and reproduces
   the same -195-point offset before the fix. Normal continuous scrolling still glides.
+- The Windows dropped-file regression waits for the native open worker to finish instead
+  of assuming it completes within three synthetic frames. It still checks both the
+  original document and the exact text of the new tab; production loading stays asynchronous.
 - Translation credentials follow native per-user paths: macOS retains its existing
   Application Support path; Windows uses `%APPDATA%\PdfCraft\private\deepseek.json`
   (with a USERPROFILE fallback); Linux uses XDG_CONFIG_HOME or `~/.config`. Tests inject
