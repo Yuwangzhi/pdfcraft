@@ -417,8 +417,14 @@ fn stroke_without_settling(h: &mut Harness<'static, PdfCraftApp>, a: (f32, f32),
         h.hover_at(from + (to - from) * (k as f32 / 4.0));
         h.run_steps(1);
     }
-    h.drop_at(to);
+    // drop_at also queues PointerGone: the harness runs another app frame for
+    // that event, which may already receive the fresh raster on a fast worker.
+    // Inspect the released stroke before that later frame can consume it.
+    let passes = h.ctx.options(|options| options.max_passes);
+    h.ctx.options_mut(|options| options.max_passes = std::num::NonZeroUsize::new(1).unwrap());
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
     h.run_steps(1);
+    h.ctx.options_mut(|options| options.max_passes = passes);
 }
 
 /// #1858: on release the live stroke is replaced by the committed annotation, but the page
