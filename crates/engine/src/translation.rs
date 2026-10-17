@@ -274,6 +274,27 @@ mod tests {
     #[cfg(windows)]
     fn translation_worker_has_no_console_and_keeps_stdout() {
         use std::os::windows::process::CommandExt;
+        // A service runner can have no console even when the creation flag is
+        // removed. Run the assertions in a fresh, explicitly console-attached
+        // test process so the negative control also detects regressions in CI.
+        const CONSOLE_CHILD: &str = "PDFCRAFT_TEST_TRANSLATION_CONSOLE_CHILD";
+        if std::env::var_os(CONSOLE_CHILD).as_deref() != Some(std::ffi::OsStr::new("1")) {
+            const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "translation::tests::translation_worker_has_no_console_and_keeps_stdout", "--nocapture"])
+                .env(CONSOLE_CHILD, "1")
+                .creation_flags(CREATE_NEW_CONSOLE)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "console-attached test failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"), "console-attached child must execute the regression test");
+            return;
+        }
         // Query the child's real console handle, rather than checking a configured flag.
         // This uses Windows PowerShell and the documented read-only GetConsoleWindow API.
         let probe = r#"Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class PdfCraftConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'; [Console]::Out.Write('console-probe:' + [PdfCraftConsoleProbe]::GetConsoleWindow().ToInt64())"#;

@@ -21,8 +21,10 @@ It adds no unsafe Rust, dependency, credential copy or new network destination.
 ## Regression
 
 `translation::tests::translation_worker_has_no_console_and_keeps_stdout` runs on
-Windows. A child PowerShell process queries its actual `GetConsoleWindow` handle
-and writes a marker through the response pipe. The negative control removes the
+Windows. The test first starts its own test executable with `CREATE_NEW_CONSOLE`.
+A child PowerShell process then queries its actual `GetConsoleWindow` handle and
+writes a marker through the response pipe. Both console inheritance and suppression
+are therefore observable on service runners. The negative control removes the
 creation flag and must observe a console; the normal worker must return handle zero.
 A failure to execute the probe is an error, rather than a successful no-window result.
 
