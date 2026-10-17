@@ -169,16 +169,33 @@ fn untranslated_prose(text: &str) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn background_command(program: &str) -> std::process::Command {
+    #[cfg(windows)]
+    let command = {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new(program);
+        // curl is a console executable. A GUI parent otherwise opens a visible black
+        // console for every translation request; keep its existing stdin/stdout pipes.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    };
+    #[cfg(not(windows))]
+    let command = std::process::Command::new(program);
+    command
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn complete(key: &str, body: serde_json::Value) -> Result<String, String> {
     use std::io::{Read, Write};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let body = body.to_string();
     let config = format!(
         "header = {}\nheader = \"Content-Type: application/json\"\ndata-binary = {}\n",
         config_quote(&format!("Authorization: Bearer {key}")),
         config_quote(&body)
     );
-    let mut child = Command::new(if cfg!(target_os = "macos") { "/usr/bin/curl" } else { "curl" })
+    let mut child = background_command(if cfg!(target_os = "macos") { "/usr/bin/curl" } else { "curl" })
         .args([
             "-q",
             "--silent",
@@ -252,6 +269,25 @@ fn parse_response(bytes: &[u8]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    fn translation_worker_has_no_console_and_keeps_stdout() {
+        use std::os::windows::process::CommandExt;
+        // Query the child's real console handle, rather than checking a configured flag.
+        // This uses Windows PowerShell and the documented read-only GetConsoleWindow API.
+        let probe = r#"Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class PdfCraftConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'; [Console]::Out.Write('console-probe:' + [PdfCraftConsoleProbe]::GetConsoleWindow().ToInt64())"#;
+        let run = |mut command: std::process::Command| {
+            let output =
+                command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", probe]).stdin(std::process::Stdio::null()).output().unwrap();
+            assert!(output.status.success(), "console probe failed: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let mut before = background_command("powershell.exe");
+        before.creation_flags(0); // Negative control: remove the fix and reproduce the console.
+        assert_ne!(run(before), "console-probe:0", "the negative control must expose the original console");
+        assert_eq!(run(background_command("powershell.exe")), "console-probe:0", "translation subprocess must not own a console window");
+    }
 
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
