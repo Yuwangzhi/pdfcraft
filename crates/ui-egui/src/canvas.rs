@@ -1029,6 +1029,12 @@ impl DocView {
         self.pages.get(&page).map(|p| p.tex.id())
     }
 
+    /// Whether the whole-page image contains the current document content. It may
+    /// still be scaled while a sharper image is rendering (diagnostics and tests).
+    pub fn page_raster_is_current(&self, page: usize) -> bool {
+        self.pages.get(&page).is_some_and(|image| image.tag != STALE_TAG)
+    }
+
     /// The print preview's picture of `page`: the sheet raster when it has arrived, otherwise the
     /// thumbnail.
     pub(crate) fn page_preview(&self, page: usize) -> Option<egui::TextureId> {

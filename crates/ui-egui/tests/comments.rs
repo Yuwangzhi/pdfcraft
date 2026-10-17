@@ -406,7 +406,7 @@ fn shapes_and_ink_are_drawn_by_dragging() {
     assert!((r[0] - 40.0).abs() < 3.0 && (r[1] - 40.0).abs() < 3.0 && (r[2] - 140.0).abs() < 3.0 && (r[3] - 100.0).abs() < 3.0, "{r:?}");
 }
 
-/// Press, drag and release a stroke, running only one frame after the release.
+/// Press, drag and release a stroke without waiting for its page raster.
 fn stroke_without_settling(h: &mut Harness<'static, PdfCraftApp>, a: (f32, f32), b: (f32, f32)) {
     let (from, to) = (at(h, a.0, a.1), at(h, b.0, b.1));
     h.hover_at(from);
@@ -417,35 +417,52 @@ fn stroke_without_settling(h: &mut Harness<'static, PdfCraftApp>, a: (f32, f32),
         h.hover_at(from + (to - from) * (k as f32 / 4.0));
         h.run_steps(1);
     }
-    // drop_at also queues PointerGone: the harness runs another app frame for
-    // that event, which may already receive the fresh raster on a fast worker.
-    // Inspect the released stroke before that later frame can consume it.
-    let passes = h.ctx.options(|options| options.max_passes);
-    h.ctx.options_mut(|options| options.max_passes = std::num::NonZeroUsize::new(1).unwrap());
-    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.drop_at(to);
     h.run_steps(1);
-    h.ctx.options_mut(|options| options.max_passes = passes);
+}
+
+fn assert_stroke_is_visible_while_rendering(h: &Harness<'static, PdfCraftApp>) {
+    let view = &h.state().views[0];
+    // Rendering may finish during the release itself. A current image already
+    // draws the stroke; otherwise its vector preview must still be present.
+    let expected = usize::from(!view.page_raster_is_current(0));
+    assert_eq!(view.comments.settling_len(), expected, "the current raster or its pending preview must draw the stroke");
 }
 
 /// #1858: on release the live stroke is replaced by the committed annotation, but the page
 /// raster that draws it arrives later. The stroke stays painted from its points meanwhile.
 #[test]
 fn a_released_pen_stroke_stays_drawn_until_the_page_raster_has_it() {
-    let mut h = harness(|app| app.set_option("quick", "ink").unwrap());
-    stroke_without_settling(&mut h, (40.0, 100.0), (140.0, 60.0));
-    assert_eq!(comments(&h).len(), 1, "the stroke is committed");
-    assert_eq!(h.state().views[0].comments.settling_len(), 1, "still drawn from its points");
-    settle(&mut h);
-    assert_eq!(h.state().views[0].comments.settling_len(), 0, "the raster draws it now");
+    for finish_before_observation in [false, true] {
+        let mut h = harness(|app| app.set_option("quick", "ink").unwrap());
+        stroke_without_settling(&mut h, (40.0, 100.0), (140.0, 60.0));
+        assert_eq!(comments(&h).len(), 1, "the stroke is committed");
+        if finish_before_observation {
+            settle(&mut h);
+        }
+        assert_stroke_is_visible_while_rendering(&h);
+        settle(&mut h);
+        assert!(h.state().views[0].page_raster_is_current(0), "the current document image must arrive");
+        assert_eq!(h.state().views[0].comments.settling_len(), 0, "the raster draws it now");
+    }
 }
 
 #[test]
 fn undoing_a_pen_stroke_before_its_raster_leaves_no_ghost() {
-    let mut h = harness(|app| app.set_option("quick", "ink").unwrap());
-    stroke_without_settling(&mut h, (40.0, 100.0), (140.0, 60.0));
-    assert_eq!(h.state().views[0].comments.settling_len(), 1);
-    h.state_mut().undo();
-    assert_eq!(h.state().views[0].comments.settling_len(), 0);
+    for finish_before_undo in [false, true] {
+        let mut h = harness(|app| app.set_option("quick", "ink").unwrap());
+        stroke_without_settling(&mut h, (40.0, 100.0), (140.0, 60.0));
+        if finish_before_undo {
+            settle(&mut h);
+        }
+        assert_stroke_is_visible_while_rendering(&h);
+        h.state_mut().undo();
+        assert!(comments(&h).is_empty(), "undo removes the committed annotation");
+        assert_eq!(h.state().views[0].comments.settling_len(), 0);
+        settle(&mut h);
+        assert!(h.state().views[0].page_raster_is_current(0), "the undone document image must arrive");
+        assert_eq!(h.state().views[0].comments.settling_len(), 0, "no preview remains after undo");
+    }
 }
 
 #[test]
