@@ -85,6 +85,8 @@ impl PdfCraftApp {
             return self.combine_can_undo(spec.needs == commands::Needs::Undo);
         }
         commands::is_enabled(spec, &self.session, self.active_ids().map(|(_, id)| id))
+            && (spec.id != "edit.copy"
+                || self.active.and_then(|i| self.views.get(i)).is_some_and(|v| !v.organize && v.selected_text().is_some_and(|t| !t.is_empty())))
             && (spec.needs != commands::Needs::TwoPageView || self.active.and_then(|i| self.views.get(i)).is_some_and(crate::DocView::cover_applies))
             && match spec.id {
                 "view.previous_view" => self.active.and_then(|i| self.views.get(i)).is_some_and(|v| !v.back.is_empty()),
@@ -401,6 +403,7 @@ impl PdfCraftApp {
             "export.image" => self.dialog = Some(Dialog::Export(crate::export_ui::ExportKind::Image)),
             "export.text" => self.dialog = Some(Dialog::Export(crate::export_ui::ExportKind::Text)),
             "a11y.check" => self.start_accessibility_check(),
+            "a11y.find_untagged" => self.find_untagged_content(),
             "ocr.recognize" => self.dialog = Some(Dialog::RecognizeText),
             "tools.js_console" => self.dialog = Some(Dialog::JsConsole),
             "tools.document_js" => {
@@ -430,6 +433,7 @@ impl PdfCraftApp {
                 }
             }
             "a11y.alt_text" => self.start_alt_text(),
+            "a11y.autotag_fields" => self.autotag_form_fields(),
             "a11y.tags" => self.choose_right_panel(Some(RightPanel::Tags)),
             "a11y.reading_options" => self.dialog = Some(Dialog::Properties(crate::PropsTab::Advanced)),
             "export.all_images" => self.dialog = Some(Dialog::Export(crate::export_ui::ExportKind::AllImages)),
@@ -517,7 +521,7 @@ impl PdfCraftApp {
             }
             "sign.validate" => {
                 let certs = self.session.trusted_certificates().to_vec();
-                self.session.set_trusted_certificates(certs);
+                self.apply_trusted_certificates(certs);
                 self.choose_right_panel(Some(RightPanel::Signatures));
             }
             "sign.panel" => self.choose_right_panel(Some(RightPanel::Signatures)),
@@ -541,6 +545,12 @@ impl PdfCraftApp {
             "edit.snapshot" => {
                 self.quick_tool = crate::QuickTool::Snapshot;
                 self.notify_tr("Drag a rectangle around the area to copy");
+            }
+            "edit.copy" => {
+                if let (Some(i), Some(ctx)) = (active, self.ctx.clone()) {
+                    return self.copy_selected_text(i, &ctx);
+                }
+                return false;
             }
             "page.copy" => self.copy_pages(false),
             "page.cut" => self.copy_pages(true),
@@ -803,7 +813,7 @@ pub(crate) fn registry_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui, menu: &str
         let shortcut = if spec.id == "edit.translate_region" {
             app.translation_shortcut.label()
         } else {
-            spec.shortcut.map(|s| shortcut_label(ui.ctx(), s)).unwrap_or_default()
+            spec.shortcut.or((spec.id == "edit.copy").then_some(COPY)).map(|s| shortcut_label(ui.ctx(), s)).unwrap_or_default()
         };
         let enabled = app.command_enabled(spec);
         let resp = ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(shortcut));

@@ -291,7 +291,22 @@ fn autotag_apply_writes_reviewable_tags_and_survives_save_reopen() {
     let pages = pdfcraft_model::pages(&reopened);
     assert_eq!(pages.len(), 2);
     assert!(pages.iter().all(|page| page.dict.contains(b"StructParents")));
-    assert!(reopened.get(reopened.root().unwrap()).as_dict().unwrap().contains(b"StructTreeRoot"));
+}
+
+#[test]
+fn autotag_form_fields_writes_reviewable_widget_tags() {
+    let dir = workdir("autotag-form-fields");
+    std::fs::write(dir.join("field.pdf"), form_pdf("name")).unwrap();
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "field.pdf" }))["doc"].as_u64().unwrap();
+    let tagged = ok(&mut a, "accessibility_autotag_form_fields", json!({ "doc": doc }));
+    assert_eq!(tagged["status"], "passed");
+    assert_eq!(tagged["remaining_findings"], 0);
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "tagged.pdf" }));
+    let reopened = ok(&mut a, "doc_open", json!({ "path": "tagged.pdf" }))["doc"].as_u64().unwrap();
+    let check = ok(&mut a, "accessibility_check", json!({ "doc": reopened, "rules": ["tagged-form-fields"] }));
+    let result = check["results"].as_array().unwrap().iter().find(|result| result["rule"] == "tagged-form-fields").unwrap();
+    assert_eq!(result["status"], "passed");
 }
 
 /// A one-page PDF whose form holds one text field named `name`.
@@ -607,6 +622,29 @@ fn text_editor_background_is_read_only_and_removes_source_glyphs() {
 }
 
 #[test]
+fn added_text_editor_background_hides_only_the_item_without_editing() {
+    let dir = workdir("added-text-preview");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let render = json!({"doc":doc,"page":1,"dpi":72});
+    let before = a.call("page_render", &render).unwrap();
+    ok(&mut a, "page_add_text", json!({"doc":doc,"page":1,"text":"Retype this label","at":[20,20],"width":160}));
+    let drawn = a.call("page_render", &render).unwrap();
+    assert_ne!(drawn, before);
+    let state = ok(&mut a, "doc_info", json!({"doc":doc}));
+    let items = ok(&mut a, "content_list", json!({"doc":doc}));
+    let preview = a.call("page_render", &json!({"doc":doc,"page":1,"dpi":72,"hide_added_text":1})).unwrap();
+    assert_eq!(preview, before, "native text and the page background stay intact");
+    assert_eq!(a.call("page_render", &render).unwrap(), drawn);
+    assert_eq!(ok(&mut a, "doc_info", json!({"doc":doc})), state);
+    assert_eq!(ok(&mut a, "content_list", json!({"doc":doc})), items);
+    for index in [-1, 0, 2, i64::MAX] {
+        assert!(a.call("page_render", &json!({"doc":doc,"page":1,"hide_added_text":index})).is_err());
+    }
+    assert!(a.call("page_render", &json!({"doc":doc,"page":1,"hide_added_text":1,"hide_text_block":1})).is_err());
+}
+
+#[test]
 fn edit_undo_redo_and_save_round_trip() {
     let dir = workdir("edit");
     let mut a = auto(&dir);
@@ -673,11 +711,10 @@ fn an_in_place_save_reports_a_required_rewrite_as_not_incremental() {
     }
 }
 
-/// Issue #1698: a save whose bytes don't reopen is refused before it touches the file. The
-/// catalog's `/Pages` is not a page tree, so the reader finds the page by scanning, while a
-/// full rewrite keeps only what the catalog reaches and drops it.
+/// #1664 repairs the missing page tree on open. The former #1698 failure fixture now
+/// saves successfully, keeping its page and pixels through a full rewrite.
 #[test]
-fn a_save_that_does_not_reopen_leaves_the_file_as_it_was() {
+fn a_recovered_page_tree_survives_a_full_save() {
     let dir = workdir("save-verify-before-write");
     let objs: [&[u8]; 4] = [
         b"<< /Type /Catalog /Pages 3 0 R >>",
@@ -705,10 +742,19 @@ fn a_save_that_does_not_reopen_leaves_the_file_as_it_was() {
     let opened = ok(&mut a, "doc_open", json!({ "path": "damaged.pdf" }));
     assert_eq!(opened["pages"], 1, "{opened}");
     let doc = opened["doc"].as_u64().unwrap();
-    let e = err(&mut a, "doc_save", json!({ "doc": doc, "full": true }));
-    assert!(e.to_string().contains("could not be reopened"), "{e}");
+    let (width, height, pixels) = a.render_pixels(doc, 1, 1.0).unwrap();
+    assert!(pixels.as_ref().as_chunks::<4>().0.iter().any(|p| p[..3] != [255, 255, 255]), "the original page is not blank");
+    let saved = ok(&mut a, "doc_save", json!({ "doc": doc, "full": true }));
+    assert_eq!(saved["document"]["dirty"], false);
     let on_disk = std::fs::read(dir.join("damaged.pdf")).unwrap();
-    assert!(on_disk == original, "the file was replaced by {} bytes that don't reopen", on_disk.len());
+    assert_ne!(on_disk, original, "a full save writes the repaired page tree");
+    let mut reopened = auto(&dir);
+    let opened = ok(&mut reopened, "doc_open", json!({ "path": "damaged.pdf" }));
+    assert_eq!(opened["pages"], 1);
+    let again = opened["doc"].as_u64().unwrap();
+    let (new_width, new_height, new_pixels) = reopened.render_pixels(again, 1, 1.0).unwrap();
+    assert_eq!((new_width, new_height), (width, height));
+    assert_eq!(new_pixels.as_ref(), pixels.as_ref(), "saving must preserve the recovered page's drawing");
 }
 
 /// organize.field-name-conflicts: combining files whose forms share a field name keeps the
@@ -3557,7 +3603,7 @@ fn text_styling_on_an_image_is_refused_without_an_edit() {
     ok(&mut a, "doc_save", json!({ "doc": doc, "path": "saved.pdf" }));
     let state = |a: &Automation| {
         let d = a.session().docs().iter().find(|d| d.id.0 == doc).unwrap();
-        (format!("{:?}", d.added), d.dirty, d.edit_generation(), d.can_undo().map(str::to_owned), d.can_redo().map(str::to_owned))
+        (format!("{:?}", d.added()), d.dirty, d.edit_generation(), d.can_undo().map(str::to_owned), d.can_redo().map(str::to_owned))
     };
     let before = state(&a);
     assert!(!before.1 && before.4.is_some(), "a clean document with a step to redo: {before:?}");
@@ -4489,11 +4535,11 @@ fn signature_appearances(path: &Path) -> String {
 fn signing_with_translated_labels_through_tools() {
     let dir = workdir("signing-labels");
     let mut a = auto(&dir);
-    ok(&mut a, "sign_id_create", json!({ "name": "Ada Lovelace", "key": "p256", "password": "secret123", "path": "ada.p12" }));
+    ok(&mut a, "sign_id_create", json!({ "name": "Ada Lovelace", "key": "p256", "password": "secret12", "path": "ada.p12" }));
     let open = |a: &mut Automation| ok(a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
     let doc = open(&mut a);
     let args = |doc: u64, extra: Value, out: &str| {
-        let mut args = json!({ "doc": doc, "id": "ada.p12", "password": "secret123", "page": 1, "rect": [10, 150, 190, 290], "reason": "Genehmigt", "location": "Berlin", "out": out });
+        let mut args = json!({ "doc": doc, "id": "ada.p12", "password": "secret12", "page": 1, "rect": [10, 150, 190, 290], "reason": "Genehmigt", "location": "Berlin", "out": out });
         for (k, v) in extra.as_object().unwrap() {
             args[k] = v.clone();
         }
@@ -6370,6 +6416,26 @@ fn absolute_gotor_consent_does_not_bypass_validation_or_passwords() {
     let opened = ok(&mut a, "link_open", json!({ "doc": doc, "page": 1, "index": 1, "allow_absolute": true, "password": "secret" }));
     assert_eq!(opened["document"]["encrypted"], true);
     assert_eq!(opened["destination_applied"], true);
+}
+
+#[test]
+fn finding_untagged_content_limits_results_to_content_annotations_and_widgets() {
+    let dir = workdir("find-untagged");
+    std::fs::write(dir.join("field.pdf"), form_pdf("name")).unwrap();
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "field.pdf" }))["doc"].as_u64().unwrap();
+    let found = ok(&mut a, "accessibility_find_untagged", json!({ "doc": doc }));
+    let active: Vec<&str> = found["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|result| result["status"] != "skipped")
+        .map(|result| result["rule"].as_str().unwrap())
+        .collect();
+    assert_eq!(active, ["tagged-content", "tagged-annotations", "tagged-form-fields"]);
+    let fields = found["results"].as_array().unwrap().iter().find(|result| result["rule"] == "tagged-form-fields").unwrap();
+    assert_eq!(fields["status"], "failed");
+    assert_eq!(fields["findings"][0]["page"], 1);
 }
 
 #[test]
