@@ -4,8 +4,10 @@ This is an independent fork of [storytold/pdfcraft](https://github.com/storytold
 It adds automatic selection-to-Chinese translation using DeepSeek Flash, selection-image
 verification for mathematical notation, rectangle screenshot translation with a configurable shortcut,
 locally rendered equations in a persistent sidebar, and macOS Chinese font support.
-The maintained build integrates upstream 0.8.0-era main (`00442a0e`, 2026-10-15);
-see [integration notes](docs/local-upstream-sync-20261015.md).
+The maintained branch integrates upstream 0.8.0-era main (`924c4da4`, synced 2026-10-17),
+including macOS quit protection, text-editing and rendering improvements;
+see [latest integration notes](docs/local-upstream-sync-20261017.md)
+and the [previous integration record](docs/local-upstream-sync-20261015.md).
 See [setup and privacy](docs/local-selection-translation.md) and [font configuration](docs/local-font-fix.md).
 No API key, private PDF or system font is included. Upstream trademarks are not used as this fork's branding.
 

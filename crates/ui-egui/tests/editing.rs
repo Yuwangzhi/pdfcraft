@@ -1777,10 +1777,12 @@ fn files_dropped_beside_the_pages_panel_still_open_as_documents() {
     h.hover_at(egui::pos2(thumb.left() - 300.0, thumb.center().y));
     h.run_steps(2);
     drop_files(&mut h, vec![Dropped("other.pdf", fixture(1))]);
-    support::wait_until(&mut h, "file dropped beside the Pages panel opens", |app| app.views.len() == 2);
+    // Native opening prepares the document on a worker; three UI frames need not give it
+    // any CPU time. Wait for the result, as the other dropped-document regression does.
+    support::wait_until(&mut h, "document dropped beside the Pages panel", |app| app.views.len() == 2 && app.password_prompt.is_none());
     assert_eq!(h.state().views.len(), 2);
     assert_eq!(texts_of(h.state(), 0), ["Page 1", "Page 2"]);
-    assert_eq!(texts_of(h.state(), 1), ["Page 1"], "the dropped file opens intact in its own tab");
+    assert_eq!(texts_of(h.state(), 1), ["Page 1"], "the dropped PDF opens as its own document");
 }
 
 fn grid_zoom(h: &Harness<'static, PdfCraftApp>) -> f32 {
@@ -2229,6 +2231,75 @@ fn replace_pages_dialog_swaps_page_content() {
     assert_eq!(doc.can_undo(), Some("Replace page"));
 }
 
+/// Pages 1 and 3 are selected. OK replaces those two and leaves the unchecked page between them.
+#[test]
+fn replace_split_selection_keeps_the_unchecked_page() {
+    fn sized(n: usize, width: u32, height: u32, label: &str) -> Vec<u8> {
+        let mut objs: Vec<String> = vec!["<< /Type /Catalog /Pages 2 0 R >>".into()];
+        let kids: Vec<String> = (0..n).map(|i| format!("{} 0 R", 4 + 2 * i)).collect();
+        objs.push(format!("<< /Type /Pages /Kids [{}] /Count {n} /MediaBox [0 0 {width} {height}] >>", kids.join(" ")));
+        objs.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into());
+        for i in 0..n {
+            objs.push(format!("<< /Type /Page /Parent 2 0 R /Contents {} 0 R /Resources << /Font << /F1 3 0 R >> >> >>", 5 + 2 * i));
+            let body = format!("BT /F1 24 Tf 20 150 Td ({label} {}) Tj ET", i + 1);
+            objs.push(format!("<< /Length {} >>\nstream\n{body}\nendstream", body.len()));
+        }
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+        for o in offsets {
+            out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+        out
+    }
+    let open = |selected: &[usize], edited: bool| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("original.pdf", None, sized(3, 200, 300, "Original")).unwrap();
+        app.views[0].select_pages(selected);
+        app.start_replace("other.pdf".into(), sized(5, 400, 500, "Replacement"));
+        if edited {
+            app.replace_draft.as_mut().unwrap().range_edited = true;
+        }
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| app);
+        h.run_steps(2);
+        h
+    };
+    let sizes = |app: &PdfCraftApp| {
+        let doc = app.session.get(app.views[0].id).unwrap();
+        doc.info.pages.iter().map(|p| (p.width.round() as i32, p.height.round() as i32)).collect::<Vec<_>>()
+    };
+    let mut split = open(&[0, 2], false);
+    let draft = split.state().replace_draft.as_ref().unwrap();
+    assert_eq!((draft.from, draft.to, draft.pages.as_slice(), draft.range_edited), (1, 3, &[0usize, 2][..], false));
+    egui_kittest::kittest::Queryable::get_by_label(&split, "OK").click();
+    split.run_steps(3);
+    assert_eq!(texts_of(split.state(), 0), ["Replacement 1", "Original 2", "Replacement 2"]);
+    assert_eq!(sizes(split.state()), [(400, 500), (200, 300), (400, 500)]);
+    assert_eq!(split.state().session.get(split.state().views[0].id).unwrap().can_undo(), Some("Replace pages"));
+    split.state_mut().undo();
+    split.run_steps(2);
+    assert_eq!(texts_of(split.state(), 0), ["Original 1", "Original 2", "Original 3"]);
+    assert_eq!(sizes(split.state()), [(200, 300), (200, 300), (200, 300)]);
+
+    let mut span = open(&[0, 2], true);
+    egui_kittest::kittest::Queryable::get_by_label(&span, "OK").click();
+    span.run_steps(3);
+    assert_eq!(texts_of(span.state(), 0), ["Replacement 1", "Replacement 2", "Replacement 3"]);
+
+    let mut adjacent = open(&[1, 2], false);
+    egui_kittest::kittest::Queryable::get_by_label(&adjacent, "OK").click();
+    adjacent.run_steps(3);
+    assert_eq!(texts_of(adjacent.state(), 0), ["Original 1", "Replacement 1", "Replacement 2"]);
+    assert_eq!(sizes(adjacent.state()), [(200, 300), (400, 500), (400, 500)]);
+}
+
 #[test]
 fn extract_options_and_rotate_pages_dialog() {
     let dir = temp_path("extract-sep");
@@ -2556,6 +2627,89 @@ fn editing_existing_text_in_place() {
     assert_eq!(doc.can_undo(), Some("Edit text"));
     assert_eq!(doc.text_lines(0)[0].text, "Chapter One");
     assert_eq!(texts_of(s, 0), ["Chapter One"], "the page shows it");
+}
+
+#[test]
+fn text_tool_clicking_source_text_edits_instead_of_adding_a_copy() {
+    let mut h = harness(1, |_| {});
+    assert!(h.state_mut().execute("edit.text"));
+    h.run_steps(2);
+    let page = h.state().views[0].page_screen_rect(0).unwrap();
+    let blank = egui::pos2(page.left() + 0.2 * page.width(), page.top() + 0.1 * page.height());
+    h.hover_at(blank);
+    h.run_steps(1);
+    h.drag_at(blank);
+    h.run_steps(1);
+    h.drop_at(blank);
+    h.run_steps(3);
+    h.event(egui::Event::Text("Keep this note".into()));
+    h.run_steps(3);
+    let point = egui::pos2(page.left() + 40.0 / 200.0 * page.width(), page.top() + 142.0 / 300.0 * page.height());
+    h.hover_at(point);
+    h.run_steps(1);
+    h.drag_at(point);
+    h.run_steps(1);
+    h.drop_at(point);
+    h.run_steps(4);
+    assert!(h.state().views[0].content.draft.is_none(), "clicking source text must not start an added layer");
+    assert_eq!(h.state().views[0].line_editor.as_ref().unwrap().text, "Page 1");
+    assert_eq!(h.state().session.get(h.state().views[0].id).unwrap().added().len(), 1, "the previous draft is kept");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.event(egui::Event::Text("Replacement".into()));
+    h.run_steps(3);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Enter);
+    h.run_steps(3);
+    assert_eq!(page_texts(h.state()), ["Keep this note\nReplacement"]);
+    assert_eq!(h.state().session.get(h.state().views[0].id).unwrap().added().len(), 1, "editing the source adds no second layer");
+}
+
+#[test]
+fn text_tool_mixed_style_row_grows_in_the_editor_and_saved_pdf() {
+    let bytes = source_font_fixture_with_text("BT /F1 12 Tf 20 220 Td (Small ) Tj /F2 12 Tf (row) Tj ET");
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("mixed-row.pdf", None, bytes).unwrap();
+        app
+    });
+    h.run_steps(4);
+    assert!(h.state_mut().execute("edit.edit_text"));
+    h.run_steps(2);
+    let page = h.state().views[0].page_screen_rect(0).unwrap();
+    let point = egui::pos2(page.left() + 25.0 / 300.0 * page.width(), page.top() + 75.0 / 300.0 * page.height());
+    h.hover_at(point);
+    h.run_steps(1);
+    h.drag_at(point);
+    h.run_steps(1);
+    h.drop_at(point);
+    h.run_steps(4);
+    let replacement = "Small row with more words";
+    h.key_press_modifiers(Modifiers::COMMAND, Key::End);
+    h.event(egui::Event::Text(" with more words".into()));
+    h.run_steps(4);
+    let galley = h
+        .output()
+        .shapes
+        .iter()
+        .find_map(|s| match &s.shape {
+            egui::Shape::Text(t) if t.galley.text() == replacement => Some(&t.galley),
+            _ => None,
+        })
+        .expect("the draft is painted");
+    assert_eq!(galley.rows.len(), 1, "mixed source runs grow as one visual row");
+    if let Ok(path) = std::env::var("PDFCRAFT_MIXED_ROW_SHOT") {
+        h.render().unwrap().save(path).unwrap();
+    }
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Enter);
+    h.run_steps(3);
+    let state = h.state();
+    let doc = state.session.get(state.views[0].id).unwrap();
+    assert_eq!(doc.text_blocks(0)[0].editor_text, replacement);
+    assert_eq!(doc.text_blocks(0)[0].rows.len(), 1);
+    let bytes = state.session.save_bytes(state.views[0].id).unwrap();
+    let mut reopened = pdfcraft_engine::Session::new();
+    let id = reopened.open("again.pdf", None, bytes, None).unwrap();
+    assert_eq!(reopened.get(id).unwrap().text_blocks(0)[0].rows.len(), 1);
 }
 
 /// One page whose only line is drawn twice at the same spot (fake bold, as many generated
@@ -3205,7 +3359,7 @@ fn check_added_text_drag(panel_open: bool) {
     h.run_steps(4);
     let added = |h: &Harness<'static, PdfCraftApp>| {
         let app = h.state();
-        app.session.get(app.views[0].id).unwrap().added.clone()
+        app.session.get(app.views[0].id).unwrap().added().to_vec()
     };
     let before_added = added(&h);
     assert_eq!(before_added.len(), 1);

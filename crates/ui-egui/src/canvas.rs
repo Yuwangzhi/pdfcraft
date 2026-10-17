@@ -305,6 +305,74 @@ pub struct RasterMemory {
     pub pending_requests: usize,
 }
 
+/// A historical snapshot opened from another document: View signed version opens the bytes
+/// a signature covers, View revision an earlier incremental revision. Repeats reuse the tab,
+/// and the tab and notice bar name what it is, instead of piling up identical tabs.
+/// What a historical snapshot shows: the bytes a signature covers, or an earlier
+/// incremental revision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotKind {
+    SignedVersion,
+    Revision,
+}
+
+#[derive(Clone, Debug)]
+pub struct Snapshot {
+    pub kind: SnapshotKind,
+    /// The 1-based revision shown.
+    pub revision: usize,
+    /// The name of the document it was opened from.
+    pub from: String,
+}
+
+/// A validation badge drawn over a signature widget: the widget rectangle (user space), the verdict it shows, and its hover text.
+pub(crate) struct SignatureBadge {
+    pub rect: [f64; 4],
+    pub status: pdfcraft_engine::SignatureStatus,
+    pub summary: &'static str,
+}
+
+/// The validation badges drawn over one page's signature widgets: signed, visible widgets
+/// on this page with coordinates that survive the cast to screen space. Hostile files can
+/// carry NaN, infinite or gigantic rectangles, which must never reach the painter.
+pub(crate) fn signature_badges(signatures: &[pdfcraft_engine::SignatureInfo], page: usize) -> Vec<SignatureBadge> {
+    signatures
+        .iter()
+        .filter(|s| s.signed && s.visible && s.page == Some(page))
+        .filter_map(|s| {
+            s.rect.filter(|r| r.iter().all(|v| v.is_finite() && v.abs() < f32::MAX as f64)).map(|rect| SignatureBadge {
+                rect,
+                status: s.status,
+                summary: s.summary(),
+            })
+        })
+        .collect()
+}
+
+/// The name shown for a document tab, the window title and the Combine picker.
+/// A snapshot reads like its source document, plus the snapshot suffix that tells
+/// the tabs apart. Without a title the file name (which already carries the suffix)
+/// is enough.
+pub(crate) fn tab_label(app: &PdfCraftApp, index: usize) -> Option<String> {
+    let view = app.views.get(index)?;
+    let doc = app.session.get(view.id)?;
+    let Some(snap) = view.snapshot.as_ref() else { return Some(doc.display_name()) };
+    Some(snapshot_tab_name(&doc.display_name(), &doc.name, snap))
+}
+
+/// A snapshot's tab name from its source title, file name and marker. Pure so the
+/// tab strip, window title and picker cannot disagree with each other.
+pub(crate) fn snapshot_tab_name(title: &str, file_name: &str, snapshot: &Snapshot) -> String {
+    if title == file_name {
+        return file_name.into();
+    }
+    if snapshot.kind == SnapshotKind::SignedVersion {
+        format!("{title} (signed version)")
+    } else {
+        format!("{title} (revision {})", snapshot.revision)
+    }
+}
+
 pub struct DocView {
     pub id: DocId,
     pub zoom: f32,
@@ -326,6 +394,11 @@ pub struct DocView {
     /// The file changed on disk while this document had unsaved changes: the notice bar asks
     /// before replacing it (#431).
     pub disk_changed: bool,
+    /// The snapshot notice bar's Close was clicked: the tab closes at the top of the next
+    /// frame, where no document borrow is held (the bar itself can't close it).
+    pub close_requested: bool,
+    /// A historical snapshot of another document (see [`Snapshot`]): `None` for real documents.
+    pub snapshot: Option<Snapshot>,
     /// Two-page view: show the first page alone, as a cover (View ▸ Page display).
     pub cover: bool,
     /// Previous view / Next view: pages visited before (and after, once going back).
@@ -630,6 +703,8 @@ impl DocView {
             notice_dismissed: false,
             scripts_off_noted: false,
             disk_changed: false,
+            close_requested: false,
+            snapshot: None,
             cover: false,
             back: Vec::new(),
             forward: Vec::new(),
@@ -752,10 +827,11 @@ impl DocView {
     }
 
     /// The document was replaced by a newer version of its file (#431). The reader's place
-    /// stays: zoom, layout, rotation, page, scroll, view history and the find bar, and the page
-    /// images on screen until their replacements are drawn, so nothing flashes. Everything that
-    /// pointed into the old version (a selected comment, a field being typed in, text being
-    /// edited, a drag, page selection) starts afresh, so no stale index reaches the new one.
+    /// stays: zoom, layout, rotation, page, scroll, view history and the find bar, the snapshot
+    /// marker and its pending close, and the page images on screen until their replacements
+    /// are drawn, so nothing flashes. Everything that pointed into the old version (a selected
+    /// comment, a field being typed in, text being edited, a drag, page selection) starts
+    /// afresh, so no stale index reaches the new one.
     pub fn document_replaced(&mut self, info: &DocInfo) {
         let mut fresh = Self::new(self.id, info, ViewDefaults::default());
         fresh.zoom = self.zoom;
@@ -770,6 +846,8 @@ impl DocView {
         fresh.shown = self.shown;
         fresh.highlight_fields = self.highlight_fields;
         fresh.notice_dismissed = self.notice_dismissed;
+        fresh.snapshot = self.snapshot.clone();
+        fresh.close_requested = self.close_requested;
         fresh.cover = self.cover;
         fresh.back = std::mem::take(&mut self.back);
         fresh.forward = std::mem::take(&mut self.forward);
@@ -2242,6 +2320,19 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     {
         f.in_panel = false;
     }
+    // The snapshot notice bar's Close was clicked: close here, where no document borrow is
+    // held. The tab is looked up by id: indices may have shifted since the click, and the
+    // flag rides its own view, so a stale flag can never close the wrong tab.
+    let pending = app.views.get(index).filter(|v| v.close_requested).map(|v| v.id).and_then(|id| app.views.iter().position(|v| v.id == id));
+    if let Some(i) = pending {
+        app.views[i].close_requested = false;
+        if app.has_unsaved_work(i) {
+            app.close_request = Some(crate::CloseRequest::Tab(app.views[i].id));
+        } else {
+            app.close_tab(i);
+        }
+        return;
+    }
     let Some(doc) = app.session.get(app.views[index].id) else { return };
     let info = &doc.info;
     if info.pages.is_empty() {
@@ -2271,6 +2362,13 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         Some(Notice::Repairs) => app.dialog = Some(crate::Dialog::Properties(crate::PropsTab::Advanced)),
         Some(Notice::Security) => app.dialog = Some(crate::Dialog::Properties(crate::PropsTab::Security)),
         Some(Notice::Unlock) => app.unlock_prompt = Some(crate::UnlockPrompt::new(doc, None)),
+        // Flags the view: the tab closes at the top of the next frame, where no document
+        // borrow is held.
+        Some(Notice::Close) => {
+            if let Some(view) = app.views.get_mut(index) {
+                view.close_requested = true;
+            }
+        }
         Some(Notice::Signatures) => app.right = Some(RightPanel::Signatures),
         Some(Notice::FieldHighlights(on)) => app.view_defaults.highlight_fields = on,
         Some(Notice::Console) => app.dialog = Some(crate::Dialog::JsConsole),
@@ -2328,6 +2426,18 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         view.auto_scroll.cancel();
         Vec2::ZERO
     };
+
+    // Drawing a comment: the pointer in a band along any edge (or just past it) scrolls the view
+    // that way, so a point beyond what is shown can be reached without letting go of the tool.
+    let edge_delta = if unobstructed && matches!(view.comments.gesture, Some(comments::Gesture::Draw { .. })) {
+        let (pointer, dt) = ui.input(|i| (if i.pointer.any_down() { i.pointer.latest_pos() } else { i.pointer.hover_pos() }, i.stable_dt));
+        crate::autoscroll::edge_scroll(pointer, avail, dt)
+    } else {
+        Vec2::ZERO
+    };
+    if edge_delta != Vec2::ZERO {
+        ui.ctx().request_repaint();
+    }
 
     let content_w = view.content_width(info, avail.width());
     let rects = view.layout(info, content_w);
@@ -2423,8 +2533,8 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     // Paging owns the vertical axis in single-page view; leave it to the pager.
     // The rest of a gesture that turned the page is swallowed too, or it would pan the new page
     // away from the edge it was shown at.
-    let paging_gesture = single_paging || (!view.continuous && view.wheel.gesture_turned());
-    if paging_gesture {
+    let paging_owns_vertical = single_paging || (!view.continuous && view.wheel.gesture_turned());
+    if paging_owns_vertical {
         precise_scroll.y = 0.0;
     }
     if now < view.precise_scroll_until {
@@ -2437,8 +2547,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     // dialog has the input, or animations are off; any click, key, zoom or other scrolling ends it.
     // Asked of the preference, not of egui's animation time, which test harnesses zero.
     let animates = app.animation_effects.animates(app.motion.reduced);
-    // A gesture consumed by a page turn owns its residual inertia as well as its deltas.
-    let may_glide = !paging_gesture && !middle_gesture && navigation_enabled && unobstructed && animates;
+    let may_glide = !paging_owns_vertical && !middle_gesture && navigation_enabled && unobstructed && animates;
     let over_page = ui.rect_contains_pointer(avail);
     ui.input(|i| view.fling.read(&i.events, now, may_glide && over_page));
     let interrupted = ui.input(|i| i.pointer.any_pressed() || i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. })));
@@ -2539,6 +2648,8 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     let redact_mark = (app.redact_prefs.hover_fill, app.redact_prefs.opacity);
     let units = app.units;
     let allowed = doc.allows_annotation();
+    let can_copy = doc.allows_copying();
+    let mut copy_selected = false;
     let comments_hidden = doc.comments_hidden();
     let form = doc.form.clone();
     let can_fill = doc.allows_form_filling();
@@ -2561,6 +2672,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     };
     let mut open_signature = false;
     let mut hover_text: Option<(Pos2, String)> = None;
+    let mut badge_hover: Option<(Pos2, String)> = None;
     // A dialog, save prompt or palette covers the page. Hover tips are drawn above those
     // windows, so a comment under the pointer would otherwise float over the dialog.
     let page_covered = app.dialog.is_some()
@@ -2584,9 +2696,9 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         view.prepare.selected = None;
     }
     view.objects.prepare(doc, tool == QuickTool::EditText && can_modify, ui.ctx());
-    view.text_background.prepare(ui.ctx(), doc, view.line_editor.as_ref(), scale);
-    let added = doc.added.clone();
-    let doc_links = if tool == QuickTool::Link { doc.links.clone() } else { Vec::new() };
+    view.text_background.prepare(ui.ctx(), doc, view.line_editor.as_ref(), view.content.draft.as_ref(), scale);
+    let added = if editing_content { doc.added().to_vec() } else { Vec::new() };
+    let doc_links = if tool == QuickTool::Link { doc.links().to_vec() } else { Vec::new() };
     if editing_content {
         crate::content_ui::after_refresh(view, &added);
     } else {
@@ -2617,9 +2729,9 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             ui.set_opacity(opacity);
         }
         // Middle-button auto-scroll, the keyboard, precise touchpad input (#759) and its glide
-        // (#531); positive y moves the content down. All scroll without easing, unlike egui's
-        // wheel default.
-        let delta = auto_delta - vec2(0.0, key_scroll) + precise_scroll + glide;
+        // (#531), and a drawing's edge scroll; positive y moves the content down. All scroll
+        // without easing, unlike egui's wheel default.
+        let delta = auto_delta + edge_delta - vec2(0.0, key_scroll) + precise_scroll + glide;
         if delta != Vec2::ZERO {
             ui.scroll_with_delta_animation(delta, egui::style::ScrollAnimation::none());
         }
@@ -2662,6 +2774,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             view.links.context = None;
         }
         for &i in &visible_pages {
+            badge_hover = None;
             let r = snap_to_pixels(rects[i].translate(origin.to_vec2()), ppp);
             if !r.intersects(visible.expand(400.0)) {
                 continue;
@@ -2804,7 +2917,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                     }
                 }
             }
-            view.text_background.paint(painter, &xf, i, view.line_editor.as_ref());
+            view.text_background.paint(painter, &xf, i, view.line_editor.as_ref(), view.content.draft.as_ref());
             if editing_content {
                 let page_tex = view.pages.get(&i).map(|p| p.tex.id());
                 view.move_background.paint(ui, painter, &xf, i, info, &view.content, page_tex);
@@ -2919,7 +3032,10 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 (o.consumed || field_tool.is_some(), false)
             } else {
                 use crate::forms_ui::FieldPointer;
-                let field = if tool == QuickTool::Select && !comments::select_grabs(ui, &pcx, view) {
+                let field = if tool == QuickTool::Select
+                    && !(editing_content && can_modify && crate::content_ui::select_grabs(ui, &xf, i, info, &added, view))
+                    && !comments::select_grabs(ui, &pcx, view)
+                {
                     crate::forms_ui::page_input(ui, &resp, &xf, i, info, &form, can_fill, view)
                 } else {
                     FieldPointer::Away
@@ -2939,9 +3055,46 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             let image_owns_pointer = tool == QuickTool::EditText && crate::edit_text_ui::image_owns_pointer(ui, &xf, i, info, view);
             let on_objects =
                 !image_owns_pointer && tool == QuickTool::EditText && can_modify && crate::object_ui::page_input(ui, &resp, &xf, i, doc, view);
+            let lines = if matches!(tool, QuickTool::AddText | QuickTool::EditText) && can_modify {
+                let generation = doc.edit_generation();
+                match view.edit_lines.get(&i) {
+                    Some((g, l)) if *g == generation => l.clone(),
+                    _ => {
+                        let l = doc.text_blocks(i);
+                        view.edit_lines.insert(i, (generation, l.clone()));
+                        l
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            let over_source = tool == QuickTool::AddText
+                && pointer.is_some_and(|p| {
+                    !crate::content_ui::hits_added(&xf, info, i, &added, p)
+                        && lines.iter().any(|line| xf.user_rect(info, i, line.rect.map(|v| v as f32)).expand(2.0).contains(p))
+                });
+            let source_blocked = over_source && view.content.hold_blocked();
+            if over_source && resp.clicked() && !source_blocked {
+                if let Some(edit) = view.content.finish_draft(&added) {
+                    view.pending_edit = Some(edit);
+                }
+                view.content.selected = None;
+            }
             let on_content = !on_objects && editing_content && can_modify && {
-                crate::content_ui::page_input(ui, &resp, &xf, i, info, &added, tool == QuickTool::AddText, &text_style, view)
-                    || tool == QuickTool::AddText
+                source_blocked
+                    || crate::content_ui::page_input(
+                        ui,
+                        &resp,
+                        &xf,
+                        i,
+                        info,
+                        &added,
+                        tool == QuickTool::AddText && !over_source,
+                        matches!(tool, QuickTool::AddText | QuickTool::EditText),
+                        &text_style,
+                        view,
+                    )
+                    || tool == QuickTool::AddText && !over_source
             };
             // Added content owns its gesture; its source text must not queue a second edit.
             // Edit text & images boxes every paragraph and image whenever the tool is on. Only the
@@ -2949,16 +3102,8 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             // input is blocked (another tab, a dialog, the window unfocused): the boxes stay drawn
             // instead of vanishing until the pointer comes back.
             let others_own_pointer = on_objects || on_content;
-            let on_edit_text = tool == QuickTool::EditText && can_modify && {
+            let on_edit_text = (tool == QuickTool::EditText || over_source) && can_modify && {
                 let generation = doc.edit_generation();
-                let lines = match view.edit_lines.get(&i) {
-                    Some((g, l)) if *g == generation => l.clone(),
-                    _ => {
-                        let l = doc.text_blocks(i);
-                        view.edit_lines.insert(i, (generation, l.clone()));
-                        l
-                    }
-                };
                 let images = match view.edit_images.get(&i) {
                     Some((g, l)) if *g == generation => l.clone(),
                     _ => {
@@ -2988,7 +3133,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 && resp.secondary_clicked()
                 && can_modify
                 && let Some(p) = pointer.filter(|p| xf.rect.contains(*p))
-                && let Some(l) = doc.links.iter().find(|l| l.page == i && crate::link_ui::screen_rect(&xf, info, i, l.rect).expand(2.0).contains(p))
+                && let Some(l) = doc.links().iter().find(|l| l.page == i && crate::link_ui::screen_rect(&xf, info, i, l.rect).expand(2.0).contains(p))
             {
                 view.links.context = Some((i, l.index));
             }
@@ -3249,8 +3394,10 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 let gesturing = view.comments.gesture.is_some() || freehand;
                 for a in info.annotations.iter().filter(|a| a.page == i && !gesturing) {
                     let sr = xf.user_rect(info, i, a.rect);
+                    let hidden = prefs.hide_empty_highlight_hover && a.subtype == "Highlight" && a.contents.as_deref().is_none_or(str::is_empty);
                     if sr.contains(p)
                         && hover_text.is_none()
+                        && !hidden
                         && let Some(text) = annotation_hover_text(a)
                     {
                         hover_text = Some((p, text));
@@ -3283,6 +3430,32 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 } else {
                     view.flash = None;
                 }
+            }
+            // Validation is viewer chrome over the signer's original artwork, which
+            // may still say "Signature Not Verified". These badges never enter document
+            // streams, image/text exports, vector printing or Print as Image.
+            for badge in signature_badges(&doc.signatures, i) {
+                let [x0, y0, x1, y1] = badge.rect;
+                let sr = xf.user_rect(info, i, [x0 as f32, y0 as f32, x1 as f32, y1 as f32]);
+                let (icon, color) = crate::sign_ui::signature_status_style(badge.status);
+                painter.rect_stroke(sr, CornerRadius::same(2), Stroke::new(1.5, color), egui::StrokeKind::Outside);
+                // A widget too small for the mark keeps its outline: the verdict still shows.
+                if sr.width() < 4.0 || sr.height() < 4.0 {
+                    continue;
+                }
+                // Big enough to read at a glance, small enough to leave the signer's own
+                // text visible around it.
+                let side = (sr.width().min(sr.height()) * 0.8).clamp(24.0, 192.0);
+                let mark = Rect::from_center_size(sr.center(), vec2(side, side));
+                icons::paint(ui, mark, icon, side * 0.64, color);
+                if let Some(p) = pointer.filter(|p| mark.expand(2.0).contains(*p)) {
+                    badge_hover = Some((p, badge.summary.to_string()));
+                }
+            }
+            // Overlapping widgets paint in order, so the topmost badge owns the hover; an
+            // earlier link or annotation hover still wins over any badge.
+            if hover_text.is_none() {
+                hover_text = badge_hover.take();
             }
         }
         // ScrollArea ignores the wheel while any widget is dragged, so a text-selection drag
@@ -3407,6 +3580,15 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 }
                 return;
             }
+            if view.comments.selected.is_none() {
+                let selected = view.selected_text().is_some_and(|t| !t.is_empty());
+                let key = crate::commands::shortcut_label(ui.ctx(), crate::commands::COPY);
+                if ui.add_enabled(can_copy && selected, egui::Button::new(tl!("Copy")).shortcut_text(key)).clicked() {
+                    copy_selected = true;
+                    ui.close();
+                }
+                ui.separator();
+            }
             // Over a picture (and no comment): Copy Image, as in Acrobat's page menu.
             let mut copy_image = None;
             if view.comments.selected.is_none()
@@ -3450,7 +3632,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     view.viewport_screen = out.inner_rect;
     view.auto_scroll.paint(ui, avail);
     if unobstructed && matches!(tool, QuickTool::Select | QuickTool::ColumnSelect) {
-        selection_actions(ui, avail, view, info, prefs, allowed && !comments_hidden);
+        copy_selected |= selection_actions(ui, avail, view, info, prefs, allowed && !comments_hidden, can_copy);
     }
 
     // Collect all main-page demand, including cached surfaces, for byte admission later.
@@ -3722,8 +3904,17 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     match image_action {
         Some(crate::edit_text_ui::ImageAction::Replace(page, index)) => app.replace_page_image_dialog(page, index),
         Some(crate::edit_text_ui::ImageAction::Save(page, index)) => app.save_page_image(page, index),
-        Some(crate::edit_text_ui::ImageAction::Copy(page, index)) => app.copy_page_image(page, index),
+        Some(crate::edit_text_ui::ImageAction::Copy(page, index)) => {
+            app.copy_page_image(page, index);
+        }
         Some(crate::edit_text_ui::ImageAction::CopyFile(page, index)) => app.copy_page_image_file(page, index),
+        Some(crate::edit_text_ui::ImageAction::Cut(page, image)) => {
+            app.views[index].image_selection = None;
+            app.cut_page_image(page, image);
+        }
+        Some(crate::edit_text_ui::ImageAction::Redact(page, index)) => app.redact_page_image(page, index),
+        Some(crate::edit_text_ui::ImageAction::Link(page, index)) => app.link_page_image(page, index),
+        Some(crate::edit_text_ui::ImageAction::Recognize(page)) => app.recognize_text_on_page(page),
         None => {}
     }
     if let Some(why) = refused {
@@ -3748,6 +3939,9 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     if let Some((name, action)) = app.views[index].forms.button.take() {
         run_button(app, index, &name, action);
     }
+    if copy_selected {
+        app.execute("edit.copy");
+    }
     quick_bar(app, avail, ui);
     if let Some((source, file, destination)) = remote_open {
         app.open_remote_link(source, file, destination);
@@ -3763,21 +3957,29 @@ enum SelectionAction {
 }
 
 /// Actions on an existing text selection, next to the selected words.
-fn selection_actions(ui: &mut egui::Ui, viewport: Rect, view: &mut DocView, info: &DocInfo, prefs: &comments::CommentPrefs, can_comment: bool) {
+fn selection_actions(
+    ui: &mut egui::Ui,
+    viewport: Rect,
+    view: &mut DocView,
+    info: &DocInfo,
+    prefs: &comments::CommentPrefs,
+    can_comment: bool,
+    can_copy: bool,
+) -> bool {
     if ui.input(|input| input.pointer.is_decidedly_dragging()) {
-        return;
+        return false;
     }
-    let Some(selection) = view.selection else { return };
-    let Some(text) = view.texts.get(&selection.page) else { return };
-    let Some(xf) = view.page_xform(selection.page) else { return };
-    let Some(last) = selection.rects(text).last().copied() else { return };
+    let Some(selection) = view.selection else { return false };
+    let Some(text) = view.texts.get(&selection.page) else { return false };
+    let Some(xf) = view.page_xform(selection.page) else { return false };
+    let Some(last) = selection.rects(text).last().copied() else { return false };
     let selected = selection.text(text);
     if selected.is_empty() {
-        return;
+        return false;
     }
     let rect = xf.view_rect(last);
     if !viewport.intersects(rect) {
-        return;
+        return false;
     }
     let x = rect.left().clamp(viewport.left() + 8.0, (viewport.right() - 520.0).max(viewport.left() + 8.0));
     let y = if rect.bottom() + 48.0 < viewport.bottom() { rect.bottom() + 6.0 } else { (rect.top() - 44.0).max(viewport.top() + 6.0) };
@@ -3796,18 +3998,17 @@ fn selection_actions(ui: &mut egui::Ui, viewport: Rect, view: &mut DocView, info
                         chosen = Some(action);
                     }
                 }
-                if ui.button(tl!("Copy")).clicked() {
+                if ui.add_enabled(can_copy, egui::Button::new(tl!("Copy"))).clicked() {
                     chosen = Some(SelectionAction::Copy);
                 }
             });
         });
     });
-    let Some(action) = chosen else { return };
+    let Some(action) = chosen else { return false };
     if let SelectionAction::Copy = action {
-        ui.ctx().copy_text(selected);
-        return;
+        return true;
     }
-    let Some((page, quads)) = view.selection_quads(info) else { return };
+    let Some((page, quads)) = view.selection_quads(info) else { return false };
     let last = quads.last().copied().unwrap_or_default();
     let at = [last[2].max(last[6]), last[1].max(last[3])];
     view.clear_selection();
@@ -3826,7 +4027,7 @@ fn selection_actions(ui: &mut egui::Ui, viewport: Rect, view: &mut DocView, info
         }
         SelectionAction::Markup(tool) => {
             // Every markup button carries a markup tool; anything else adds nothing.
-            let Some(kind) = tool.markup() else { return };
+            let Some(kind) = tool.markup() else { return false };
             view.pending_edit = Some(Edit::AddAnnotation(pdfcraft_engine::NewAnnotation {
                 page,
                 shape: pdfcraft_engine::Shape::TextMarkup { kind, quads },
@@ -3835,9 +4036,10 @@ fn selection_actions(ui: &mut egui::Ui, viewport: Rect, view: &mut DocView, info
                 author: prefs.author.clone(),
             }));
         }
-        // Copied above.
+        // Copy is dispatched through the app after the view borrow ends.
         SelectionAction::Copy => {}
     }
+    false
 }
 
 /// Run a push button's action (the ones that need no JavaScript engine).
@@ -4075,10 +4277,13 @@ enum Notice {
     Console,
     /// Unlock… (enter the permissions password).
     Unlock,
+    /// Close this historical snapshot tab (View signed version / View revision).
+    Close,
 }
 
-/// The notice bar above the pages: the signature status first (Acrobat's signature bar), then
-/// a form's scripts having been turned off, security, forms and warnings.
+/// The notice bar above the pages: a file changed on disk first, then what a historical
+/// snapshot is, then the signature status bar, a form's scripts having been turned
+/// off, security, forms and warnings.
 fn notices(
     view: &mut DocView,
     doc: &pdfcraft_engine::Document,
@@ -4112,6 +4317,30 @@ fn notices(
             });
         });
         return reload.then_some(Notice::Reload);
+    }
+    // A historical snapshot (View signed version / View revision): what it is, above the
+    // signature and security bars, so the tab is never mistaken for the live document.
+    if let Some(snap) = view.snapshot.as_ref() {
+        let mut close = false;
+        let text = if snap.kind == SnapshotKind::SignedVersion {
+            crate::i18n::fmt(
+                tl!("You are viewing the signed version of “{from}” (revision {rev}). It is a snapshot: changes here won't affect the original."),
+                &[("from", &snap.from), ("rev", &snap.revision.to_string())],
+            )
+        } else {
+            crate::i18n::fmt(
+                tl!("You are viewing revision {rev} of “{from}”. It is a snapshot: changes here won't affect the original."),
+                &[("rev", &snap.revision.to_string()), ("from", &snap.from)],
+            )
+        };
+        notice_bar(ui, t, "clock", t.accent_text, text, |ui| {
+            if crate::widgets::pill_button(ui, tl!("Close"), true).clicked() {
+                close = true;
+            }
+        });
+        if close {
+            return Some(Notice::Close);
+        }
     }
     if let Some((icon, color, template, arg)) = signed {
         let mut open = false;
@@ -4970,6 +5199,84 @@ mod tests {
         assert_eq!(annotation_hover_text(&annotation(true)), None);
     }
 
+    fn signature(signed: bool, visible: bool, page: Option<usize>, rect: Option<[f64; 4]>) -> pdfcraft_engine::SignatureInfo {
+        pdfcraft_engine::SignatureInfo {
+            field: "Signature1".into(),
+            signed,
+            page,
+            rect,
+            visible,
+            signer: None,
+            certificate: None,
+            chain: Vec::new(),
+            date: None,
+            signing_time: None,
+            reason: None,
+            location: None,
+            contact: None,
+            sub_filter: None,
+            doc_timestamp: false,
+            certify: None,
+            revision: 1,
+            signed_len: 0,
+            digest: None,
+            algorithm: None,
+            timestamp: false,
+            timestamp_time: None,
+            status: pdfcraft_engine::SignatureStatus::Valid,
+            modification: pdfcraft_engine::sign::Modification::None,
+            details: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn signature_badges_keep_signed_visible_widgets_on_the_page() {
+        let rect = [10.0, 10.0, 100.0, 50.0];
+        let signatures =
+            vec![signature(true, true, Some(0), Some(rect)), signature(true, true, Some(1), Some(rect)), signature(true, true, Some(0), Some(rect))];
+        let badges = signature_badges(&signatures, 0);
+        assert_eq!(badges.len(), 2);
+        assert_eq!(badges[0].rect, rect);
+    }
+
+    #[test]
+    fn signature_badges_skip_unsigned_invisible_and_unplaced_fields() {
+        let rect = [10.0, 10.0, 100.0, 50.0];
+        let signatures = vec![
+            signature(false, true, Some(0), Some(rect)),
+            signature(true, false, Some(0), Some(rect)),
+            signature(true, true, Some(0), None),
+            signature(true, true, Some(0), Some(rect)),
+        ];
+        let badges = signature_badges(&signatures, 0);
+        assert_eq!(badges.len(), 1);
+        assert_eq!(badges[0].rect, rect);
+    }
+
+    #[test]
+    fn signature_badges_skip_rectangles_that_cannot_reach_the_screen() {
+        let hostile = vec![
+            [f64::NAN, 10.0, 100.0, 50.0],
+            [10.0, f64::INFINITY, 100.0, 50.0],
+            [10.0, 10.0, f64::NEG_INFINITY, 50.0],
+            [10.0, 10.0, 1e300, 50.0],
+            [10.0, 10.0, 100.0, 50.0],
+        ];
+        let signatures: Vec<_> = hostile.into_iter().map(|rect| signature(true, true, Some(0), Some(rect))).collect();
+        let badges = signature_badges(&signatures, 0);
+        assert_eq!(badges.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_tabs_read_like_their_source_plus_the_suffix() {
+        let snap = Snapshot { kind: SnapshotKind::SignedVersion, revision: 1, from: "report.pdf".into() };
+        assert_eq!(snapshot_tab_name("Report", "report.pdf", &snap), "Report (signed version)");
+        let rev = Snapshot { kind: SnapshotKind::Revision, revision: 2, from: "report.pdf".into() };
+        assert_eq!(snapshot_tab_name("Report", "report.pdf", &rev), "Report (revision 2)");
+        assert_eq!(snapshot_tab_name("report.pdf", "report.pdf", &snap), "report.pdf");
+        assert_eq!(snapshot_tab_name("report (revision 2).pdf", "report (revision 2).pdf", &rev), "report (revision 2).pdf");
+    }
+
     #[test]
     fn grayscale_converts_colours_to_their_luminance() {
         let img = egui::ColorImage::new([2, 1], vec![Color32::from_rgb(255, 0, 0), Color32::from_rgba_premultiplied(0, 51, 102, 128)]);
@@ -5127,6 +5434,7 @@ trailer << /Root 1 0 R >>
     fn explicit_search_jumps_record_history_and_keep_match_destination() {
         for step in [None, Some(true), Some(false)] {
             let mut v = history_search_view();
+            v.page_input = "draft in progress".into();
             v.goto_point = Some((3, Some(0.8), Some(0.9), Vec2::ZERO));
             if let Some(forward) = step {
                 v.find_step(forward);
@@ -5135,9 +5443,11 @@ trailer << /Root 1 0 R >>
             }
             assert_eq!(v.back, vec![0], "explicit search jump must remember its origin");
             assert_eq!(v.goto, Some((3, 0.5)), "keep the match offset instead of the page top");
-            // The chrome updates the idle editor from this page; navigation itself must
-            // preserve a focused draft (covered by viewer::page_input tests).
             assert_eq!(v.current, 3);
+            assert_eq!(v.current_page_label(None), "4");
+            // Chrome refreshes the idle page box; navigation must not overwrite a draft
+            // that may still be focused. DocView does not own the editor's focus state.
+            assert_eq!(v.page_input, "draft in progress");
             assert!(v.goto_point.is_none(), "an earlier link destination cannot override the search offset");
             v.go_to_match(1);
             assert_eq!(v.back, vec![0], "same-page matches do not duplicate history");

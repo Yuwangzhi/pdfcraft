@@ -7,7 +7,10 @@
 //!   server ([`mcp`]), `pdfcraft-cli run` and (later) the UI control channel.
 //! - Pages are **1-based** in every tool, as people number them. Rectangles are in PDF points
 //!   with the origin at the top-left of the displayed page.
-//! - An optional root directory confines every path a tool reads or writes.
+//! - An optional root directory confines every path a tool reads or writes. Separately,
+//!   [`file_access::AutomationRoots`] (`pdfcraft-cli mcp --automation-read-root` and
+//!   `--automation-write-root`) holds a read folder and a write folder, each left out meaning no
+//!   access of its kind.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -16,6 +19,7 @@ mod batch;
 mod comments;
 mod content;
 mod conventions;
+pub mod file_access;
 mod forms;
 mod links;
 #[cfg(feature = "mcp")]
@@ -108,6 +112,8 @@ const FIND_MAX_WARNING_BYTES: usize = 1024;
 pub struct Automation {
     session: Session,
     root: Option<PathBuf>,
+    /// The read and write folders of `--automation-read-root` / `--automation-write-root`.
+    roots: Option<Arc<file_access::AutomationRoots>>,
     /// Synchronous renderers, rebuilt when a document's working bytes change.
     renderers: HashMap<DocId, (Arc<Vec<u8>>, PageRenderer)>,
     /// Extracted page text, under one memory budget across all open documents.
@@ -122,7 +128,7 @@ impl Default for Automation {
 
 impl Automation {
     pub fn new() -> Self {
-        Self { session: Session::new(), root: None, renderers: HashMap::new(), texts: TextCache::default() }
+        Self { session: Session::new(), root: None, roots: None, renderers: HashMap::new(), texts: TextCache::default() }
     }
 
     /// Confine every path the tools read or write to `root` (relative paths resolve inside it).
@@ -133,6 +139,14 @@ impl Automation {
         }
         self.root = Some(root);
         Ok(self)
+    }
+
+    /// Confine the files the tools read to the read root and the files they write to the write
+    /// root (`None`: no confinement). Applies on top of [`with_root`](Self::with_root) when both
+    /// are set.
+    pub fn with_automation_roots(mut self, roots: Option<Arc<file_access::AutomationRoots>>) -> Self {
+        self.roots = roots;
+        self
     }
 
     /// Use a fixed clock for saves (deterministic output in tests).
@@ -158,7 +172,7 @@ impl Automation {
     /// Returns where the file went.
     pub fn write_output(&self, path: &str, bytes: &[u8]) -> Result<PathBuf> {
         let target = self.resolve(path, true)?;
-        let special = self.root.is_none() && std::fs::metadata(&target).is_ok_and(|m| !m.is_file() && !m.is_dir());
+        let special = self.root.is_none() && self.roots.is_none() && std::fs::metadata(&target).is_ok_and(|m| !m.is_file() && !m.is_dir());
         if special {
             std::fs::write(&target, bytes).map_err(|e| failed(format!("{path}: {e}")))?;
         } else {
@@ -587,6 +601,12 @@ impl Automation {
                         .iter()
                         .map(|p| self.resolve(p.as_str().ok_or_else(|| ToolError::InvalidArgs("directory must be a path".into()))?, false))
                         .collect::<Result<Vec<_>>>()?
+                } else if let Some(roots) = &self.roots {
+                    // The installed fonts are outside the roots: look in the read root instead.
+                    let read = roots
+                        .read_root()
+                        .ok_or_else(|| failed("automation filesystem access is not granted: read authority is absent: installed fonts"))?;
+                    vec![self.resolve(&read.to_string_lossy(), false)?]
                 } else if let Some(root) = &self.root {
                     vec![root.clone()]
                 } else {
@@ -792,8 +812,10 @@ impl Automation {
             "comment_set_status" => self.comment_set_status(&a)?,
             "sign_list" => self.sign_list(&a)?,
             "accessibility_check" => self.a11y_check(&a)?,
+            "accessibility_find_untagged" => self.a11y_find_untagged(&a)?,
             "accessibility_autotag_preview" => self.accessibility_autotag_preview(&a)?,
             "accessibility_autotag_apply" => self.accessibility_autotag_apply(&a)?,
+            "accessibility_autotag_form_fields" => self.accessibility_autotag_form_fields(&a)?,
             "ocr_recognize" => self.ocr_recognize(&a)?,
             "js_run" => self.js_run(&a)?,
             "js_document_scripts" => self.js_document_scripts(&a)?,
@@ -824,6 +846,7 @@ impl Automation {
             "accessibility_figures" => self.accessibility_figures(&a)?,
             "accessibility_set_alt" => self.accessibility_set_alt(&a)?,
             "accessibility_tags" => self.accessibility_tags(&a)?,
+            "accessibility_tag_content" => self.accessibility_tag_content(&a)?,
             "accessibility_set_tag_property" => self.accessibility_set_tag_property(&a)?,
             "accessibility_mark_tag_artifact" => self.accessibility_mark_tag_artifact(&a)?,
             "accessibility_move_tag" => self.accessibility_move_tag(&a)?,
@@ -938,7 +961,14 @@ impl Automation {
         let id = doc.id;
         let target = match a.opt_str("path")? {
             Some(p) => self.resolve(p, true)?,
-            None => PathBuf::from(doc.path.clone().ok_or_else(|| failed("the document has never been saved: pass a path"))?),
+            None => {
+                // Saving in place writes where the file was opened from, which the read root
+                // allows and the write root may not.
+                let own = doc.path.clone().ok_or_else(|| failed("the document has never been saved: pass a path"))?;
+                let own_path = PathBuf::from(&own);
+                self.check_roots(&own, &own_path, file_access::Access::Write)?;
+                own_path
+            }
         };
         let same_file = doc.path.as_deref().is_some_and(|p| Path::new(p) == target);
         // Saving to a new file is a full rewrite unless asked otherwise, like Save As.
@@ -951,11 +981,24 @@ impl Automation {
         // A save that adds or removes encryption, or must not keep the old revision (Sanitize,
         // redaction), is rewritten in full even when an incremental save was asked for.
         let incremental = !full && bytes.starts_with(&self.doc(a)?.saved_bytes());
+        self.publish_save(id, &target, bytes, incremental, write)
+    }
+
+    /// Validate the prepared bytes before publishing them or marking the document saved.
+    fn publish_save(
+        &mut self,
+        id: DocId,
+        target: &Path,
+        bytes: Arc<Vec<u8>>,
+        incremental: bool,
+        write: impl FnOnce(&Path, &[u8]) -> Result<()>,
+    ) -> Result<Value> {
         self.session.check_save(id, &bytes).map_err(failed)?;
-        write(&target, &bytes)?;
+        write(target, &bytes)?;
         let path = target.to_string_lossy().into_owned();
         self.session.mark_saved(id, bytes.clone(), Some(path.clone())).map_err(failed)?;
-        Ok(json!({ "path": path, "bytes": bytes.len(), "incremental": incremental, "document": summary(self.doc(a)?) }))
+        let doc = self.session.get(id).ok_or_else(|| failed("the saved document is no longer open"))?;
+        Ok(json!({ "path": path, "bytes": bytes.len(), "incremental": incremental, "document": summary(doc) }))
     }
 
     fn doc_revisions(&mut self, a: &Args) -> Result<Value> {
@@ -1817,12 +1860,23 @@ impl Automation {
             return Err(ToolError::InvalidArgs(format!("dpi must be between 1 and {MAX_DPI}")));
         }
         let scale = (dpi / 72.0) as f32;
-        let out = if let Some(block) = a.opt_int("hide_text_block")? {
+        let block = a.opt_int("hide_text_block")?;
+        let added = a.opt_int("hide_added_text")?;
+        if block.is_some() && added.is_some() {
+            return Err(ToolError::InvalidArgs("choose only one of hide_text_block and hide_added_text".into()));
+        }
+        let out = if let Some(block) = block {
             let index = usize::try_from(block)
                 .ok()
                 .and_then(|n| n.checked_sub(1))
                 .ok_or_else(|| ToolError::InvalidArgs("hide_text_block must be a positive paragraph index from text_paragraphs".into()))?;
             self.doc(a)?.text_edit_preview(page, index).map_err(failed)?.render_background(scale).map_err(failed)?
+        } else if let Some(added) = added {
+            let index = usize::try_from(added)
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .ok_or_else(|| ToolError::InvalidArgs("hide_added_text must be a positive added text index from object_list".into()))?;
+            self.doc(a)?.added_text_preview(page, index).map_err(failed)?.render_background(scale).map_err(failed)?
         } else {
             self.renderer(id)?.render(RenderRequest { page, kind: RequestKind::Pixels, tile: None, scale, tag: 0, preview: false })
         };
@@ -2055,6 +2109,29 @@ impl Automation {
     /// namespace is refused without touching it, and the deepest existing ancestor (links
     /// followed) must be inside the root before anything about the rest is reported.
     fn resolve(&self, path: &str, for_write: bool) -> Result<PathBuf> {
+        let access = if for_write { file_access::Access::Write } else { file_access::Access::Read };
+        self.resolve_for(path, access, for_write)
+    }
+
+    /// [`resolve`](Self::resolve) with the kind of access named, for the places where a file that
+    /// is only read may still be missing (a path checked up front, whose absence is reported per
+    /// file later). The automation roots, if any, get the last word.
+    fn resolve_for(&self, path: &str, access: file_access::Access, may_be_missing: bool) -> Result<PathBuf> {
+        let target = self.resolve_in_root(path, may_be_missing)?;
+        self.check_roots(path, &target, access)?;
+        Ok(target)
+    }
+
+    /// Hold `target`, which `path` named, to the automation read or write root. Always passes
+    /// without roots.
+    fn check_roots(&self, path: &str, target: &Path, access: file_access::Access) -> Result<()> {
+        match &self.roots {
+            Some(roots) => roots.check_path(path, target, access).map_err(failed),
+            None => Ok(()),
+        }
+    }
+
+    fn resolve_in_root(&self, path: &str, for_write: bool) -> Result<PathBuf> {
         let p = Path::new(path);
         let Some(root) = &self.root else { return Ok(p.to_path_buf()) };
         let outside = || failed(format!("{path} is outside the allowed directory {}", root.display()));
@@ -2941,6 +3018,37 @@ mod tests {
             }
             std::fs::remove_dir_all(dir).unwrap();
         }
+    }
+
+    #[test]
+    fn invalid_save_bytes_never_reach_publication_or_mark_saved() {
+        let dir = staging_dir("invalid-save-bytes");
+        let target = dir.join("out.pdf");
+        let mut a = Automation::new().with_root(&dir).unwrap();
+        let id = search_document(&mut a, 2);
+        json(&mut a, "doc_save", json!({"doc": id.0, "path": "out.pdf"}));
+        let old = std::fs::read(&target).unwrap();
+        json(&mut a, "page_rotate", json!({"doc": id.0, "pages": [1], "degrees": 90}));
+        let before = summary(a.session.get(id).unwrap());
+        // Exercise both parse failure and a valid PDF that loses a page. This does not
+        // depend on a malformed input remaining unrepaired by future reader improvements.
+        for bytes in [b"not a PDF".to_vec(), numbered_pages(1)] {
+            let mut published = false;
+            let result = a.publish_save(id, &target, Arc::new(bytes), false, |_, _| {
+                published = true;
+                Ok(())
+            });
+            assert!(result.is_err(), "invalid output must be refused");
+            assert!(result.unwrap_err().to_string().contains("could not be reopened"));
+            assert!(!published, "validation must precede the writer");
+            assert_eq!(summary(a.session.get(id).unwrap()), before, "failed validation must preserve document state");
+            assert_eq!(std::fs::read(&target).unwrap(), old);
+            assert_eq!(listing(&dir), ["out.pdf"]);
+        }
+        json(&mut a, "doc_save", json!({"doc": id.0}));
+        assert!(!a.session.get(id).unwrap().dirty);
+        assert_ne!(std::fs::read(&target).unwrap(), old);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
