@@ -88,8 +88,19 @@ impl Translation {
         {
             self.start(ctx, text, image);
         }
-        let (now, pointer_down) = ctx.input(|i| (i.time, i.pointer.any_down()));
-        let should_start = self.trigger.observe(selection, now, pointer_down).is_some();
+        // A click can move, press and release across separate frames. Keep the canvas
+        // stable through the whole gesture, including the approach to a selection action.
+        let (now, pointer_active) = ctx.input(|i| {
+            (
+                i.time,
+                i.pointer.any_down()
+                    || i.pointer.any_pressed()
+                    || i.pointer.any_released()
+                    // The first pointer location has zero delta, but still begins a gesture.
+                    || i.events.iter().any(|event| matches!(event, egui::Event::PointerMoved(_))),
+            )
+        });
+        let should_start = self.trigger.observe(selection, now, pointer_active).is_some();
         if self.trigger.due {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -212,16 +223,16 @@ impl<K> Default for SelectionTrigger<K> {
 }
 
 impl<K: PartialEq + Clone> SelectionTrigger<K> {
-    fn observe(&mut self, text: Option<K>, now: f64, pointer_down: bool) -> Option<K> {
+    fn observe(&mut self, text: Option<K>, now: f64, pointer_active: bool) -> Option<K> {
         if text != self.observed {
             self.observed = text;
             self.deadline = now + 0.3;
             self.due = self.observed.is_some();
         }
-        if pointer_down {
+        if pointer_active {
             self.deadline = now + 0.3;
         }
-        if self.due && !pointer_down && now >= self.deadline {
+        if self.due && !pointer_active && now >= self.deadline {
             self.due = false;
             return self.observed.clone();
         }
