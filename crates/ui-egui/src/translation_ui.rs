@@ -125,7 +125,7 @@ impl Translation {
         let mut open = self.open;
         let mut retry = false;
         let t = crate::theme::Tokens::get(&ctx);
-        egui::Panel::right(egui::Id::new(("translation-panel", doc)))
+        egui::Panel::right(egui::IdSalt::new(("translation-panel", doc)))
             .default_size(420.0)
             .size_range(300.0..=620.0)
             .resizable(true)
@@ -261,17 +261,17 @@ mod tests {
         });
         h.run_steps(5);
         h.get_by_label("This document has no bookmarks.");
-        let layout = serde_json::to_value(&h.state().docking).unwrap();
+        let layout = h.state().side_panels;
         h.state_mut().views[0].translation =
             Translation { open: true, source: "Synthetic selection".into(), result: Some(Ok("测试译文".into())), ..Default::default() };
         h.run_steps(5);
         assert!(h.query_by_label("This document has no bookmarks.").is_none());
         assert_eq!(h.state().right, Some(crate::RightPanel::Bookmarks));
-        assert_eq!(serde_json::to_value(&h.state().docking).unwrap(), layout);
+        assert_eq!(h.state().side_panels, layout);
         h.state_mut().views[0].translation.open = false;
         h.run_steps(5);
         h.get_by_label("This document has no bookmarks.");
-        assert_eq!(serde_json::to_value(&h.state().docking).unwrap(), layout);
+        assert_eq!(h.state().side_panels, layout);
     }
 
     #[test]
@@ -281,13 +281,14 @@ mod tests {
             Translation {
                 open: true, source: "Source stays hidden until requested.".into(), result: Some(Ok("译文".into())), ..Default::default()
             };
-        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 900.0)).build_ui_state(
-            |ui, state: &mut Translation| {
-                state.update(ui.ctx(), None);
-                state.show(ui, 1);
-            },
-            state,
-        );
+        let mut h =
+            egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 900.0)).with_context_setup(crate::theme::install_fonts).build_ui_state(
+                |ui, state: &mut Translation| {
+                    state.update(ui.ctx(), None);
+                    state.show(ui, 1);
+                },
+                state,
+            );
         h.run_steps(4);
         assert!(h.query_by_label("Source stays hidden until requested.").is_none());
         h.get_by_label("查看原文").click();
