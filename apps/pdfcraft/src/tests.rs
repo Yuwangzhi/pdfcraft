@@ -717,3 +717,14 @@ fn document_tabs_are_below_the_native_titlebar() {
     assert_eq!(viewport.movable_by_window_background, Some(false));
     assert!(!super::PdfCraftApp::new().integrated_titlebar);
 }
+
+#[test]
+fn socks_update_transport_reports_connection_errors_without_panicking() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let proxy = ureq::Proxy::new(&format!("socks5://{address}")).unwrap();
+    let config = ureq::Agent::config_builder().proxy(Some(proxy)).timeout_connect(Some(std::time::Duration::from_secs(1))).build();
+    let result = config.new_agent().get("http://127.0.0.1:1/").call();
+    assert!(result.is_err(), "an unavailable proxy is an ordinary connection error");
+}

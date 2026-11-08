@@ -19,3 +19,7 @@ The integration is validated with the five affected packages (`pdfcraft`, `pdfcr
 ## Source verification result
 
 The affected-package validation completed with 3,442 passed, 0 failed and 10 conditional skips. The final UI integration rerun passed 1,499 tests; it updates the platform-specific macOS Settings menu label and the new last settings card in existing expectations. Warning-denied Clippy, formatting, assets, layers, parity and the 33-crate WASM check passed. Disabling the new prompt makes all four continuation regressions fail; the production logic was restored before final validation. Installed-app verification is recorded separately in the local release receipt.
+
+## Native proxy compatibility
+
+The existing updater transport now enables ureq's SOCKS support, preserving the user's configured proxy. A local closed-port regression verifies that a SOCKS connection failure returns an error instead of panicking. The native application suite passed 78 tests after this change, and scoped warning-denied Clippy and formatting passed. The dependency feature adds no new packages.
